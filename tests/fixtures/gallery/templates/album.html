@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <meta name="generator" content="{{generator}}">
+  <meta name="author" content="{{gallery.author}}">
+  <title>{{#album.parent}}{{album.title}} - {{/album.parent}}{{gallery.title}}</title>
+  {{#gallery.base_url}}<link rel="home" href="{{gallery.base_url}}/">{{/gallery.base_url}}
+  <link rel="stylesheet" href="{{path_to_root}}assets/fram.css">
+</head>
+<body>
+  {{> header}}
+  <main
+    data-url="{{album.url}}"
+    data-path-to-root="{{album.path_to_root}}"
+    data-item-count="{{album.item_count}}"
+    data-cover-src="{{album.cover.s.url}}">
+    {{#has_sub_albums}}
+    <ul class="gallery-grid">
+      {{#sub_albums}}
+      <li>
+        <a class="gallery-grid__item" href="{{url}}">
+          <img class="gallery-grid__image"
+            src="{{cover.m.url}}"
+            width="{{cover.m.width}}"
+            height="{{cover.m.height}}"
+            alt="{{title}}"
+            loading="lazy">
+          <span class="gallery-grid__caption">
+            <span class="gallery-grid__title" aria-hidden="true">{{title}}</span>
+            <small class="gallery-grid__count">{{item_count}} items</small>
+          </span>
+        </a>
+      </li>
+      {{/sub_albums}}
+    </ul>
+    {{/has_sub_albums}}
+
+    {{#has_media}}
+    <div class="gallery-grid" data-label="{{album.title}}">
+      {{#media}}
+      <a class="gallery-grid__item{{#is_image}} gallery-grid__item--image{{/is_image}}{{#is_video}} gallery-grid__item--video{{/is_video}}"
+        href="{{original_url}}"
+        download="{{title}}"
+        data-small-src="{{s.url}}"
+        data-small-width="{{s.width}}"
+        data-small-height="{{s.height}}"
+        data-large-src="{{l.url}}"
+        data-large-width="{{l.width}}"
+        data-large-height="{{l.height}}"
+        {{#is_video}}type="video/mp4" data-duration="{{duration}}"{{/is_video}}>
+          <img class="gallery-grid__image"
+            src="{{m.url}}"
+            width="{{m.width}}"
+            height="{{m.height}}"
+            alt="{{title}}"
+            loading="lazy">
+          <span class="gallery-grid__caption">
+            <span class="gallery-grid__title" aria-hidden="true">{{title}}</span>
+          </span>
+      </a>
+      {{/media}}
+    </div>
+    {{/has_media}}
+  </main>
+  {{> footer}}
+</body>
+</html>

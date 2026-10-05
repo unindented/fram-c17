@@ -1,0 +1,11 @@
+/* Generated from `fram_version.c.in`. Change project(VERSION), not the generated source. */
+
+#include "core/fram_version.h"
+
+const char* fram_version_string(void) {
+  return "@PROJECT_VERSION@";
+}
+
+const char* fram_generator_string(void) {
+  return "@PROJECT_NAME@ @PROJECT_VERSION@";
+}

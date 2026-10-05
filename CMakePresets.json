@@ -1,0 +1,189 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_COMPILE_WARNING_AS_ERROR": "ON"
+      }
+    },
+    {
+      "name": "debug",
+      "inherits": "base",
+      "displayName": "Debug with ASan and UBSan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "FRAM_SANITIZER": "address"
+      }
+    },
+    {
+      "name": "tsan",
+      "inherits": "base",
+      "displayName": "Debug with TSan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "FRAM_SANITIZER": "thread"
+      }
+    },
+    {
+      "name": "release",
+      "inherits": "base",
+      "displayName": "Optimized release with debug information",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "FRAM_BUILD_TESTING": "OFF"
+      }
+    },
+    {
+      "name": "multi",
+      "inherits": "base",
+      "displayName": "Ninja multi-config",
+      "generator": "Ninja Multi-Config"
+    },
+    {
+      "name": "release-linux-x86_64",
+      "inherits": "release",
+      "displayName": "x86_64 Linux musl release",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/x86_64-linux-musl.cmake",
+      "cacheVariables": {
+        "FRAM_RELEASE_TARGET": "x86_64-linux-musl"
+      }
+    },
+    {
+      "name": "release-linux-aarch64",
+      "inherits": "release",
+      "displayName": "aarch64 Linux musl release",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/aarch64-linux-musl.cmake",
+      "cacheVariables": {
+        "FRAM_RELEASE_TARGET": "aarch64-linux-musl"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "debug",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "tsan",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "multi-debug",
+      "configurePreset": "multi",
+      "configuration": "Debug"
+    },
+    {
+      "name": "multi-relwithdebinfo",
+      "configurePreset": "multi",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "release-linux-x86_64",
+      "configurePreset": "release-linux-x86_64"
+    },
+    {
+      "name": "release-linux-aarch64",
+      "configurePreset": "release-linux-aarch64"
+    },
+    {
+      "name": "lint",
+      "configurePreset": "debug",
+      "targets": ["fram_lint"]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error" }
+    },
+    {
+      "name": "debug",
+      "inherits": "base",
+      "configurePreset": "debug"
+    },
+    {
+      "name": "tsan",
+      "inherits": "base",
+      "configurePreset": "tsan"
+    },
+    {
+      "name": "multi-debug",
+      "inherits": "base",
+      "configurePreset": "multi",
+      "configuration": "Debug"
+    },
+    {
+      "name": "multi-relwithdebinfo",
+      "inherits": "base",
+      "configurePreset": "multi",
+      "configuration": "RelWithDebInfo"
+    }
+  ],
+  "packagePresets": [
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "generators": ["TGZ"]
+    },
+    {
+      "name": "release-linux-x86_64",
+      "configurePreset": "release-linux-x86_64",
+      "generators": ["TGZ"]
+    },
+    {
+      "name": "release-linux-aarch64",
+      "configurePreset": "release-linux-aarch64",
+      "generators": ["TGZ"]
+    }
+  ],
+  "workflowPresets": [
+    {
+      "name": "ci-debug",
+      "steps": [
+        { "type": "configure", "name": "debug" },
+        { "type": "build", "name": "debug" },
+        { "type": "build", "name": "lint" },
+        { "type": "test", "name": "debug" }
+      ]
+    },
+    {
+      "name": "ci-tsan",
+      "steps": [
+        { "type": "configure", "name": "tsan" },
+        { "type": "build", "name": "tsan" },
+        { "type": "test", "name": "tsan" }
+      ]
+    },
+    {
+      "name": "ci-release",
+      "steps": [
+        { "type": "configure", "name": "release" },
+        { "type": "build", "name": "release" }
+      ]
+    },
+    {
+      "name": "ci-multi",
+      "steps": [
+        { "type": "configure", "name": "multi" },
+        { "type": "build", "name": "multi-debug" },
+        { "type": "test", "name": "multi-debug" },
+        { "type": "build", "name": "multi-relwithdebinfo" },
+        { "type": "test", "name": "multi-relwithdebinfo" }
+      ]
+    }
+  ]
+}
