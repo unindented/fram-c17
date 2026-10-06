@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="media/logo.png" height="300" alt="">
+  <img src="media/logo.webp" height="300" alt="">
 </div>
 
 <h1 align="center"><code>fram</code> /fɹeɪ̯m/</h1>
