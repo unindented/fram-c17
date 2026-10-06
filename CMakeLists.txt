@@ -8,7 +8,7 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET
 
 project(
   fram
-  VERSION 0.1.0
+  VERSION 0.1.1
   DESCRIPTION "A small static photo and video gallery generator written in C17"
   HOMEPAGE_URL "https://github.com/unindented/fram-c17"
   LANGUAGES C
