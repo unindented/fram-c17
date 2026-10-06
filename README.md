@@ -1,4 +1,8 @@
-# `fram` /fɹeɪ̯m/
+<div align="center">
+  <img src="media/logo.png" height="300" alt="">
+</div>
+
+<h1 align="center"><code>fram</code> /fɹeɪ̯m/</h1>
 
 This is a small static photo and video gallery generator written in C17.
 
