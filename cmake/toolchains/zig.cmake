@@ -5,6 +5,16 @@ if(NOT ZIG_TARGET)
 endif()
 
 find_program(ZIG_EXECUTABLE NAMES zig REQUIRED)
+# Require Zig 0.17. Zig 0.16 crashes when it writes the linker dependency file that CMake requests.
+execute_process(
+  COMMAND "${ZIG_EXECUTABLE}" version
+  OUTPUT_VARIABLE ZIG_VERSION
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  COMMAND_ERROR_IS_FATAL ANY)
+if(ZIG_VERSION VERSION_LESS 0.17)
+  message(FATAL_ERROR "Zig 0.17 or newer is required; got '${ZIG_VERSION}'")
+endif()
+
 # Require `llvm-strip`. The host `strip` tool cannot read Zig's LLVM ELF files.
 find_program(CMAKE_STRIP NAMES llvm-strip REQUIRED)
 
@@ -14,9 +24,6 @@ set(CMAKE_C_COMPILER_TARGET "${ZIG_TARGET}")
 set(CMAKE_C_ARCHIVE_CREATE "\"${ZIG_EXECUTABLE}\" ar qc <TARGET> <LINK_FLAGS> <OBJECTS>")
 set(CMAKE_C_ARCHIVE_APPEND "\"${ZIG_EXECUTABLE}\" ar q <TARGET> <LINK_FLAGS> <OBJECTS>")
 set(CMAKE_C_ARCHIVE_FINISH "\"${ZIG_EXECUTABLE}\" ranlib <TARGET>")
-
-# Zig 0.16 cannot write the linker dependency file that CMake requests.
-set(CMAKE_C_LINKER_DEPFILE_SUPPORTED FALSE)
 
 set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)

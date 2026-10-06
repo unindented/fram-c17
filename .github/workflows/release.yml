@@ -101,7 +101,7 @@ jobs:
         if: runner.os == 'Linux'
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
-          version: 0.16.0
+          version: 0.17.0
 
       - name: Install QEMU
         if: matrix.target == 'aarch64-linux-musl'
