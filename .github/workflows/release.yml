@@ -24,7 +24,7 @@ jobs:
       matrix: ${{ steps.targets.outputs.matrix }}
       target_count: ${{ steps.targets.outputs.count }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Single source of truth for release targets: the package matrix and the archive-count check
       # below both derive from this output.
@@ -93,13 +93,13 @@ jobs:
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.resolve.outputs.tag }}
 
       - name: Install Zig
         if: runner.os == 'Linux'
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
         with:
           version: 0.16.0
 
@@ -206,7 +206,7 @@ jobs:
           esac
 
       - name: Upload package
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.target }}
           path: build/${{ matrix.preset }}/*.tar.gz
@@ -222,7 +222,7 @@ jobs:
       contents: write
     steps:
       - name: Download packages
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           merge-multiple: true
