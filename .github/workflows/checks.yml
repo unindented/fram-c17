@@ -1,0 +1,69 @@
+name: Checks
+
+# Reusable CI job shared by workflows so install/build steps stay in a single place and cannot
+# drift.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref to check out; defaults to the triggering ref when empty"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-latest
+          - macos-26
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install quality tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 22 all
+          sudo apt-get install -y cppcheck ffmpeg ninja-build
+          echo "CC=clang-22" >> "$GITHUB_ENV"
+
+      - name: Install quality tools (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm cppcheck ffmpeg ninja
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Record build tool versions
+        run: |
+          cmake --version
+          ninja --version
+          "${CC:-cc}" --version
+
+      - name: Resolve build and test parallelism
+        run: |
+          echo "CMAKE_BUILD_PARALLEL_LEVEL=$(getconf _NPROCESSORS_ONLN)" >> "$GITHUB_ENV"
+          echo "CTEST_PARALLEL_LEVEL=$(getconf _NPROCESSORS_ONLN)" >> "$GITHUB_ENV"
+
+      - name: Lint, build, and test with ASan and UBSan
+        run: cmake --workflow --preset ci-debug
+
+      - name: Build and test with TSan
+        run: cmake --workflow --preset ci-tsan
+
+      - name: Build the release configuration
+        run: cmake --workflow --preset ci-release
+
+      - name: Build and test two configurations with a second generator
+        run: cmake --workflow --preset ci-multi
