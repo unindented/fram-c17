@@ -9,7 +9,7 @@ struct Arena;
  * @brief Rejects a generated output path that exceeds either output-path limit.
  *
  * Every producer of an output path reports a limit failure through this one function, so the album,
- * media, aggregate, and asset paths share one wording. The limits themselves are applied by
+ * media, aggregate, and static file paths share one wording. The limits themselves are applied by
  * `path_check_output_limits`.
  *
  * @param relative_path Output path relative to the output directory. Must not be `NULL`.

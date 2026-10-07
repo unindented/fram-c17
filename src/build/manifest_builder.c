@@ -21,9 +21,9 @@
  * Size in bytes of the diagnostic label naming one configured template list entry, including the
  * `NUL` terminator. The `<config key>[<index>]` label tells two colliding template outputs apart. A
  * bare template name cannot: one name listed twice in `aggregate_templates` is a different mistake
- * from a template whose output collides with an album or asset, with a different fix, and it would
- * otherwise report as a collision between a value and itself. The name is left out of the label
- * because it is already the tail of the output path these messages trail.
+ * from a template whose output collides with an album or static file, with a different fix, and it
+ * would otherwise report as a collision between a value and itself. The name is left out of the
+ * label because it is already the tail of the output path these messages trail.
  */
 enum { TEMPLATE_SOURCE_LABEL_SIZE = 64 };
 
@@ -43,9 +43,9 @@ _Static_assert(TEMPLATE_SOURCE_LABEL_SIZE >
  * byte-equal. A `(device, inode)` comparison also detects cases that text cannot. These include
  * symlinks, hard links, and case-insensitive path aliases.
  *
- * The input roots reject any output below `input_dir`, `templates_dir`, or `assets_dir` first, so
+ * The input roots reject any output below `input_dir`, `templates_dir`, or `static_dir` first, so
  * this set is what still protects an input outside all three trees: the configuration file, and the
- * target of a source, template, or asset that is a symlink or hard link to a file elsewhere.
+ * target of a source, template, or static file that is a symlink or hard link to a file elsewhere.
  *
  * The identities are sorted once after they are all claimed, and each lookup is a binary search. A
  * rebuild looks up every output that already exists, which is every output of a gallery built
@@ -68,7 +68,7 @@ struct InputIdentities {
 
 /**
  * Number of input directory trees no output may enter: `input_dir`, `templates_dir`, and
- * `assets_dir`.
+ * `static_dir`.
  */
 enum { INPUT_ROOT_COUNT = 3 };
 
@@ -89,10 +89,10 @@ struct InputRoot {
  * registered.
  *
  * Protecting the files that already exist is not enough. A new output below `input_dir` can be
- * discovered as a media source by the next build, and a new output below `assets_dir` is copied as
- * an asset by the next build. A new output below `templates_dir` can be read as a partial by the
- * render of the same build, because partials resolve lazily. None of them overwrites a file, so the
- * identity set cannot see any of them.
+ * discovered as a media source by the next build, and a new output below `static_dir` is copied as
+ * a static file by the next build. A new output below `templates_dir` can be read as a partial by
+ * the render of the same build, because partials resolve lazily. None of them overwrites a file, so
+ * the identity set cannot see any of them.
  *
  * Each root is compared by identity against the directories an output passes through, for the same
  * reasons the identity set is. `./photos`, `photos/`, a symlinked root, and a case-insensitive
@@ -104,7 +104,7 @@ struct InputRoot {
  * output tree can still lead into a root.
  */
 struct InputRoots {
-  /** The `input_dir`, `templates_dir`, and `assets_dir` roots. */
+  /** The `input_dir`, `templates_dir`, and `static_dir` roots. */
   struct InputRoot items[INPUT_ROOT_COUNT];
 
   /** Output directory every registered output path is joined onto. */
@@ -114,8 +114,8 @@ struct InputRoots {
 /**
  * @brief Records the identity of every file this build reads.
  *
- * Claims the configuration file, each discovered media source, each enumerated asset, and every
- * file below `templates_dir`.
+ * Claims the configuration file, each discovered media source, each enumerated static file, and
+ * every file below `templates_dir`.
  *
  * This claims the configuration file for the same reason as the rest. It is a file this build
  * reads, and `output_dir = "."` with an aggregate template named after it is enough to aim an
@@ -131,10 +131,10 @@ struct InputRoots {
  * relative name joined below `templates_dir`.
  *
  * This skips a path with no identity rather than refusing it. A missing configuration file, source
- * or asset cannot be overwritten, and neither can a missing `templates_dir`, which claims nothing.
- * `cmd_build` already rejects a missing `templates_dir` while loading the build inputs, and the
- * render reports a missing template with a template-specific diagnostic, so failing here would only
- * report an absence earlier and with less context.
+ * or static file cannot be overwritten, and neither can a missing `templates_dir`, which claims
+ * nothing. `cmd_build` already rejects a missing `templates_dir` while loading the build inputs,
+ * and the render reports a missing template with a template-specific diagnostic, so failing here
+ * would only report an absence earlier and with less context.
  *
  * The template tree is listed first, so the set is allocated once with a slot for every candidate.
  *
@@ -143,7 +143,7 @@ struct InputRoots {
  * @param gallery_config Configuration supplying `templates_dir`. Must not be `NULL`.
  * @param config_path    Path the configuration was loaded from. Must not be `NULL`.
  * @param source_paths   Every discovered media source path. Must not be `NULL`.
- * @param asset_paths    Every enumerated file below `assets_dir`. Must not be `NULL`.
+ * @param static_paths   Every enumerated file below `static_dir`. Must not be `NULL`.
  * @param err            Destination buffer for a failure diagnostic.
  * @param err_len        Size of `err` in bytes.
  * @return `0` when every readable input was claimed, or `-1` when the template tree cannot be
@@ -153,7 +153,7 @@ static int claim_build_inputs(struct InputIdentities* inputs,
                               const struct GalleryConfig* gallery_config,
                               const char* config_path,
                               const struct PathList* source_paths,
-                              const struct PathList* asset_paths,
+                              const struct PathList* static_paths,
                               char* err,
                               size_t err_len) __attribute__((nonnull(1, 2, 3, 4, 5)));
 
@@ -202,7 +202,7 @@ static int compare_identities(const void* a, const void* b) __attribute__((nonnu
 static void free_input_identities(struct InputIdentities* inputs) __attribute__((nonnull(1)));
 
 /**
- * @brief Records the identity of `input_dir`, `templates_dir`, and `assets_dir`.
+ * @brief Records the identity of `input_dir`, `templates_dir`, and `static_dir`.
  *
  * A root with no identity is recorded as absent rather than refused, for the same reason
  * `claim_input_identity` skips a missing file: it holds no input an output could land among.
@@ -316,31 +316,32 @@ static int register_template_output(struct Manifest* manifest,
                                     size_t err_len) __attribute__((nonnull(1, 2, 3, 4, 5, 6, 7)));
 
 /**
- * @brief Registers one enumerated asset's output path in the build manifest.
+ * @brief Registers one enumerated static file's output path in the build manifest.
  *
- * @param manifest       Manifest that receives the output path. Must not be `NULL`.
- * @param output_dir     Output directory the asset's `assets/` destination is rooted under. Must
- *                       not be `NULL`.
- * @param asset_relative Asset path relative to `assets_dir`. Must not be `NULL`.
- * @param asset_path     Asset source path, the diagnostic label for the output. Must not be `NULL`.
- * @param inputs         Identities of this build's input files, which the output must not name.
- *                       Must not be `NULL`.
- * @param roots          Input directory trees the output must not land in. Must not be `NULL`.
- * @param scratch        Arena that owns the joined output path during registration. Must not be
- *                       `NULL`.
- * @param err            Destination buffer for a failure diagnostic.
- * @param err_len        Size of `err` in bytes.
+ * @param manifest        Manifest that receives the output path. Must not be `NULL`.
+ * @param output_dir      Output directory the static file's destination is rooted under. Must not
+ *                        be `NULL`.
+ * @param static_relative Static file path relative to `static_dir`. Must not be `NULL`.
+ * @param static_path     Static file source path, the diagnostic label for the output. Must not be
+ *                        `NULL`.
+ * @param inputs          Identities of this build's input files, which the output must not name.
+ *                        Must not be `NULL`.
+ * @param roots           Input directory trees the output must not land in. Must not be `NULL`.
+ * @param scratch         Arena that owns the joined output path during registration. Must not be
+ *                        `NULL`.
+ * @param err             Destination buffer for a failure diagnostic.
+ * @param err_len         Size of `err` in bytes.
  * @return `0` on success, or `-1` on an oversize path, a collision, or allocation failure.
  */
-static int register_asset_output(struct Manifest* manifest,
-                                 const char* output_dir,
-                                 const char* asset_relative,
-                                 const char* asset_path,
-                                 const struct InputIdentities* inputs,
-                                 const struct InputRoots* roots,
-                                 struct Arena* scratch,
-                                 char* err,
-                                 size_t err_len) __attribute__((nonnull(1, 2, 3, 4, 5, 6, 7)));
+static int register_static_output(struct Manifest* manifest,
+                                  const char* output_dir,
+                                  const char* static_relative,
+                                  const char* static_path,
+                                  const struct InputIdentities* inputs,
+                                  const struct InputRoots* roots,
+                                  struct Arena* scratch,
+                                  char* err,
+                                  size_t err_len) __attribute__((nonnull(1, 2, 3, 4, 5, 6, 7)));
 
 /**
  * @brief Adds one output path to the manifest, reporting a duplicate, an output inside an input
@@ -354,7 +355,7 @@ static int register_asset_output(struct Manifest* manifest,
  *                     be `NULL`.
  * @param source_label Diagnostic label for the source producing `output_path`: an album's source
  *                     directory path, a media item's source path, a configured template list entry,
- *                     or an asset's source path. Must not be `NULL`.
+ *                     or a static file's source path. Must not be `NULL`.
  * @param inputs       Identities of this build's input files, which `output_path` must not name.
  *                     Must not be `NULL`.
  * @param roots        Input directory trees `output_path` must not land in. Must not be `NULL`.
@@ -431,7 +432,7 @@ int manifest_builder_populate(struct Manifest* manifest,
                               const struct GalleryConfig* gallery_config,
                               const char* config_path,
                               const struct PathList* source_paths,
-                              const struct PathList* asset_paths,
+                              const struct PathList* static_paths,
                               const struct Album* const* albums,
                               size_t album_count,
                               char* err,
@@ -446,7 +447,7 @@ int manifest_builder_populate(struct Manifest* manifest,
   int rc = manifest_builder_check_output_dir(gallery_config, err, err_len);
   claim_input_roots(&roots, gallery_config);
   if (rc == 0) {
-    rc = claim_build_inputs(&inputs, gallery_config, config_path, source_paths, asset_paths, err,
+    rc = claim_build_inputs(&inputs, gallery_config, config_path, source_paths, static_paths, err,
                             err_len);
   }
 
@@ -481,15 +482,16 @@ int manifest_builder_populate(struct Manifest* manifest,
                                   &roots, &scratch, err, err_len);
   }
 
-  for (size_t i = 0; rc == 0 && i < asset_paths->count; i++) {
-    const char* relative = path_relative_below(asset_paths->items[i], gallery_config->assets_dir);
+  for (size_t i = 0; rc == 0 && i < static_paths->count; i++) {
+    const char* relative = path_relative_below(static_paths->items[i], gallery_config->static_dir);
     if (relative == NULL) {
-      rc = error_report(err, err_len, "asset path is not below configured assets directory: '%s'",
-                        asset_paths->items[i]);
+      rc = error_report(err, err_len,
+                        "static file path is not below configured static directory: '%s'",
+                        static_paths->items[i]);
       continue;
     }
-    rc = register_asset_output(manifest, gallery_config->output_dir, relative,
-                               asset_paths->items[i], &inputs, &roots, &scratch, err, err_len);
+    rc = register_static_output(manifest, gallery_config->output_dir, relative,
+                                static_paths->items[i], &inputs, &roots, &scratch, err, err_len);
   }
 
   // Every path is now recorded, so scan for the collision `manifest_add` cannot see incrementally:
@@ -516,21 +518,17 @@ char* manifest_builder_derive_template_output(const char* output_dir,
   return path_join(output_dir, template_name, arena);
 }
 
-char* manifest_builder_derive_asset_output(const char* output_dir,
-                                           const char* asset_relative,
-                                           struct Arena* arena) {
-  const char* output_assets_dir = path_join(output_dir, "assets", arena);
-  if (output_assets_dir == NULL) {
-    return NULL;
-  }
-  return path_join(output_assets_dir, asset_relative, arena);
+char* manifest_builder_derive_static_output(const char* output_dir,
+                                            const char* static_relative,
+                                            struct Arena* arena) {
+  return path_join(output_dir, static_relative, arena);
 }
 
 static int claim_build_inputs(struct InputIdentities* inputs,
                               const struct GalleryConfig* gallery_config,
                               const char* config_path,
                               const struct PathList* source_paths,
-                              const struct PathList* asset_paths,
+                              const struct PathList* static_paths,
                               char* err,
                               size_t err_len) {
   struct PathList template_paths;
@@ -538,9 +536,9 @@ static int claim_build_inputs(struct InputIdentities* inputs,
   int rc = claim_build_inputs_list_templates(&template_paths, gallery_config->templates_dir,
                                              gallery_config->output_dir, err, err_len);
   if (rc == 0) {
-    // One slot for the configuration file, then one per source, per asset and per template file.
-    // `calloc` fails on product overflow rather than wrapping.
-    inputs->items = calloc(1 + source_paths->count + asset_paths->count + template_paths.count,
+    // One slot for the configuration file, then one per source, per static file and per template
+    // file. `calloc` fails on product overflow rather than wrapping.
+    inputs->items = calloc(1 + source_paths->count + static_paths->count + template_paths.count,
                            sizeof(*inputs->items));
     if (inputs->items == NULL) {
       rc = error_report(err, err_len, "out of memory recording build input files");
@@ -549,8 +547,8 @@ static int claim_build_inputs(struct InputIdentities* inputs,
       for (size_t i = 0; i < source_paths->count; i++) {
         claim_input_identity(inputs, source_paths->items[i]);
       }
-      for (size_t i = 0; i < asset_paths->count; i++) {
-        claim_input_identity(inputs, asset_paths->items[i]);
+      for (size_t i = 0; i < static_paths->count; i++) {
+        claim_input_identity(inputs, static_paths->items[i]);
       }
       for (size_t i = 0; i < template_paths.count; i++) {
         claim_input_identity(inputs, template_paths.items[i]);
@@ -617,11 +615,11 @@ static void claim_input_roots(struct InputRoots* roots,
   *roots = (struct InputRoots){
       .items = {{.config_key = "input_dir"},
                 {.config_key = "templates_dir"},
-                {.config_key = "assets_dir"}},
+                {.config_key = "static_dir"}},
       .output_dir = gallery_config->output_dir,
   };
   const char* root_dirs[INPUT_ROOT_COUNT] = {
-      gallery_config->input_dir, gallery_config->templates_dir, gallery_config->assets_dir};
+      gallery_config->input_dir, gallery_config->templates_dir, gallery_config->static_dir};
   for (size_t i = 0; i < INPUT_ROOT_COUNT; i++) {
     roots->items[i].is_present = fs_identify(root_dirs[i], &roots->items[i].identity) == 0;
   }
@@ -739,28 +737,28 @@ static int register_template_output(struct Manifest* manifest,
                               err_len);
 }
 
-static int register_asset_output(struct Manifest* manifest,
-                                 const char* output_dir,
-                                 const char* asset_relative,
-                                 const char* asset_path,
-                                 const struct InputIdentities* inputs,
-                                 const struct InputRoots* roots,
-                                 struct Arena* scratch,
-                                 char* err,
-                                 size_t err_len) {
+static int register_static_output(struct Manifest* manifest,
+                                  const char* output_dir,
+                                  const char* static_relative,
+                                  const char* static_path,
+                                  const struct InputIdentities* inputs,
+                                  const struct InputRoots* roots,
+                                  struct Arena* scratch,
+                                  char* err,
+                                  size_t err_len) {
   const char* output_path =
-      manifest_builder_derive_asset_output(output_dir, asset_relative, scratch);
+      manifest_builder_derive_static_output(output_dir, static_relative, scratch);
   if (output_path == NULL) {
-    return error_report(err, err_len, "out of memory building output path for asset '%s'",
-                        asset_path);
+    return error_report(err, err_len, "out of memory building output path for static file '%s'",
+                        static_path);
   }
   // The limits bound the path below `output_dir`. That is the derived path past `output_dir` and
   // the separator `path_join` adds, the same offset `find_input_root_holding` starts from.
-  if (output_path_check_limits(output_path + strlen(output_dir) + 1, asset_path, err, err_len) !=
+  if (output_path_check_limits(output_path + strlen(output_dir) + 1, static_path, err, err_len) !=
       0) {
     return -1;
   }
-  return register_output_path(manifest, output_path, asset_path, inputs, roots, scratch, err,
+  return register_output_path(manifest, output_path, static_path, inputs, roots, scratch, err,
                               err_len);
 }
 

@@ -133,7 +133,7 @@ static void test_load_applies_required_and_defaults(void) {
   TEST_CHECK(strcmp(config.input_dir, "media") == 0);
   TEST_CHECK(strcmp(config.output_dir, "public") == 0);
   TEST_CHECK(strcmp(config.templates_dir, "templates") == 0);
-  TEST_CHECK(strcmp(config.assets_dir, "assets") == 0);
+  TEST_CHECK(strcmp(config.static_dir, "static") == 0);
   TEST_CHECK(strcmp(config.album_template, "album.html") == 0);
   TEST_CHECK(config.aggregate_templates != NULL);
   TEST_CHECK(config.aggregate_template_count == 0);
@@ -171,7 +171,7 @@ static void test_load_overrides_optional_keys(void) {
       "input_dir = \"photos\"\n"
       "output_dir = \"dist\"\n"
       "templates_dir = \"layouts\"\n"
-      "assets_dir = \"static\"\n"
+      "static_dir = \"files\"\n"
       "album_template = \"pages/album.html\"\n"
       "aggregate_templates = [\"sitemap.xml\", \"about/index.html\"]\n"
       "derivatives = { tiny = { width = 200, height = 150, quality = 61, crop = true }, "
@@ -192,7 +192,7 @@ static void test_load_overrides_optional_keys(void) {
   TEST_CHECK(strcmp(config.input_dir, "photos") == 0);
   TEST_CHECK(strcmp(config.output_dir, "dist") == 0);
   TEST_CHECK(strcmp(config.templates_dir, "layouts") == 0);
-  TEST_CHECK(strcmp(config.assets_dir, "static") == 0);
+  TEST_CHECK(strcmp(config.static_dir, "files") == 0);
   TEST_CHECK(strcmp(config.album_template, "pages/album.html") == 0);
   if (!TEST_CHECK(config.aggregate_template_count == 2)) {
     goto cleanup;
@@ -230,7 +230,7 @@ static void test_load_normalizes_directory_keys(void) {
       "input_dir = \"media/\"\n"
       "output_dir = \"/srv/www///\"\n"
       "templates_dir = \"../shared/templates/\"\n"
-      "assets_dir = \"static/\"\n";
+      "static_dir = \"files/\"\n";
   struct TempConfig temp_config;
   const char* config_path = write_temp_config(&temp_config, toml);
   if (config_path == NULL) {
@@ -245,7 +245,7 @@ static void test_load_normalizes_directory_keys(void) {
   TEST_CHECK(strcmp(config.input_dir, "media") == 0);
   TEST_CHECK(strcmp(config.output_dir, "/srv/www") == 0);
   TEST_CHECK(strcmp(config.templates_dir, "../shared/templates") == 0);
-  TEST_CHECK(strcmp(config.assets_dir, "static") == 0);
+  TEST_CHECK(strcmp(config.static_dir, "files") == 0);
 
   gallery_config_free(&config);
   remove_fixture_tree(temp_config.root_dir);
@@ -617,7 +617,7 @@ static void test_load_rejects_empty_directory_keys(void) {
       {"input_dir = \"\"\n", "config key 'input_dir' must not be empty"},
       {"output_dir = \"/\"\n", "config key 'output_dir' must not be empty"},
       {"templates_dir = \"///\"\n", "config key 'templates_dir' must not be empty"},
-      {"assets_dir = \"\"\n", "config key 'assets_dir' must not be empty"},
+      {"static_dir = \"\"\n", "config key 'static_dir' must not be empty"},
   };
 
   for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
@@ -789,7 +789,7 @@ static void test_print_defaults(void) {
                     "input_dir = \"media\"\n"
                     "output_dir = \"public\"\n"
                     "templates_dir = \"templates\"\n"
-                    "assets_dir = \"assets\"\n"
+                    "static_dir = \"static\"\n"
                     "album_template = \"album.html\"\n"
                     "aggregate_templates = []\n"
                     "derivatives = { s = { width = 120, height = 120, quality = 70, crop = true }, "
@@ -820,7 +820,7 @@ static void test_print_escapes_strings(void) {
                     "input_dir = \"media\"\n"
                     "output_dir = \"public\"\n"
                     "templates_dir = \"templates\"\n"
-                    "assets_dir = \"assets\"\n"
+                    "static_dir = \"static\"\n"
                     "album_template = \"album.html\"\n"
                     "aggregate_templates = []\n"
                     "derivatives = { s = { width = 120, height = 120, quality = 70, crop = true }, "
@@ -850,7 +850,7 @@ static void test_print_load_round_trips(void) {
   config.input_dir = "photos";
   config.output_dir = "dist";
   config.templates_dir = "layouts";
-  config.assets_dir = "static";
+  config.static_dir = "files";
   config.album_template = "pages/album.html";
   config.aggregate_templates = aggregates;
   config.aggregate_template_count = 2;
@@ -879,7 +879,7 @@ static void test_print_load_round_trips(void) {
   TEST_CHECK(strcmp(reloaded.input_dir, config.input_dir) == 0);
   TEST_CHECK(strcmp(reloaded.output_dir, config.output_dir) == 0);
   TEST_CHECK(strcmp(reloaded.templates_dir, config.templates_dir) == 0);
-  TEST_CHECK(strcmp(reloaded.assets_dir, config.assets_dir) == 0);
+  TEST_CHECK(strcmp(reloaded.static_dir, config.static_dir) == 0);
   TEST_CHECK(strcmp(reloaded.album_template, config.album_template) == 0);
   if (!TEST_CHECK(reloaded.aggregate_template_count == 2)) {
     goto cleanup;
@@ -942,7 +942,7 @@ static void test_print_empty_template_array(void) {
                     "input_dir = \"media\"\n"
                     "output_dir = \"public\"\n"
                     "templates_dir = \"templates\"\n"
-                    "assets_dir = \"assets\"\n"
+                    "static_dir = \"static\"\n"
                     "album_template = \"album.html\"\n"
                     "aggregate_templates = []\n"
                     "derivatives = { s = { width = 120, height = 120, quality = 70, crop = true }, "

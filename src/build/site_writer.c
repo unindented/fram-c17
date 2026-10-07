@@ -76,27 +76,27 @@ int site_writer_write_aggregates(const struct GalleryConfig* gallery_config,
   return 0;
 }
 
-int site_writer_copy_assets(const struct GalleryConfig* gallery_config,
-                            const struct PathList* asset_paths,
-                            char* err,
-                            size_t err_len) {
+int site_writer_copy_static_files(const struct GalleryConfig* gallery_config,
+                                  const struct PathList* static_paths,
+                                  char* err,
+                                  size_t err_len) {
   struct Arena scratch;
   arena_init(&scratch);
   int rc = 0;
-  for (size_t i = 0; rc == 0 && i < asset_paths->count; i++) {
-    const char* relative = path_relative_below(asset_paths->items[i], gallery_config->assets_dir);
+  for (size_t i = 0; rc == 0 && i < static_paths->count; i++) {
+    const char* relative = path_relative_below(static_paths->items[i], gallery_config->static_dir);
     char* output_path =
-        manifest_builder_derive_asset_output(gallery_config->output_dir, relative, &scratch);
+        manifest_builder_derive_static_output(gallery_config->output_dir, relative, &scratch);
     if (output_path == NULL) {
-      (void)error_report(err, err_len, "out of memory building output path for asset '%s'",
-                         asset_paths->items[i]);
+      (void)error_report(err, err_len, "out of memory building output path for static file '%s'",
+                         static_paths->items[i]);
       rc = -1;
       continue;
     }
     char reason[FS_REASON_SIZE];
-    if (fs_copy_file(asset_paths->items[i], output_path, reason, sizeof(reason)) != 0) {
-      (void)error_report(err, err_len, "failed to copy asset: %s (for '%s', to '%s')", reason,
-                         asset_paths->items[i], output_path);
+    if (fs_copy_file(static_paths->items[i], output_path, reason, sizeof(reason)) != 0) {
+      (void)error_report(err, err_len, "failed to copy static file: %s (for '%s', to '%s')", reason,
+                         static_paths->items[i], output_path);
       rc = -1;
     }
   }

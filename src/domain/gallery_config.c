@@ -54,7 +54,7 @@ const char* const GALLERY_CONFIG_PATH_DEFAULT = "fram.toml";
 static const char* const INPUT_DIR_DEFAULT = "media";
 static const char* const OUTPUT_DIR_DEFAULT = "public";
 static const char* const TEMPLATES_DIR_DEFAULT = "templates";
-static const char* const ASSETS_DIR_DEFAULT = "assets";
+static const char* const STATIC_DIR_DEFAULT = "static";
 static const char* const ALBUM_TEMPLATE_DEFAULT = "album.html";
 
 // The root album already renders to `index.html`. A default aggregate of that name would make the
@@ -74,7 +74,7 @@ static const char* const config_keys[] = {
     "input_dir",
     "output_dir",
     "templates_dir",
-    "assets_dir",
+    "static_dir",
     "album_template",
     "aggregate_templates",
     "derivatives",
@@ -286,7 +286,7 @@ static const char* skip_scheme(const char* url, const char* scheme) __attribute_
  * that rule in one place and makes `gallery_config_print` round-trip the normalized form. The
  * location is not otherwise constrained. An absolute or parent-relative directory stays valid.
  *
- * @param gallery_config Config whose `input_dir`, `output_dir`, `templates_dir`, and `assets_dir`
+ * @param gallery_config Config whose `input_dir`, `output_dir`, `templates_dir`, and `static_dir`
  *                       are normalized. Must not be `NULL`.
  * @param err            Buffer for a diagnostic message on failure.
  * @param err_len        Size of `err` in bytes.
@@ -384,7 +384,7 @@ void gallery_config_init(struct GalleryConfig* gallery_config) {
       .input_dir = INPUT_DIR_DEFAULT,
       .output_dir = OUTPUT_DIR_DEFAULT,
       .templates_dir = TEMPLATES_DIR_DEFAULT,
-      .assets_dir = ASSETS_DIR_DEFAULT,
+      .static_dir = STATIC_DIR_DEFAULT,
       .album_template = ALBUM_TEMPLATE_DEFAULT,
       .aggregate_templates = AGGREGATE_TEMPLATES_DEFAULT,
       .aggregate_template_count = 0,
@@ -423,7 +423,7 @@ int gallery_config_print(FILE* stream, const struct GalleryConfig* gallery_confi
   gallery_config_print_key_string(stream, "input_dir", gallery_config->input_dir);
   gallery_config_print_key_string(stream, "output_dir", gallery_config->output_dir);
   gallery_config_print_key_string(stream, "templates_dir", gallery_config->templates_dir);
-  gallery_config_print_key_string(stream, "assets_dir", gallery_config->assets_dir);
+  gallery_config_print_key_string(stream, "static_dir", gallery_config->static_dir);
   gallery_config_print_key_string(stream, "album_template", gallery_config->album_template);
   gallery_config_print_string_array(stream, "aggregate_templates",
                                     gallery_config->aggregate_templates,
@@ -533,7 +533,7 @@ static int gallery_config_load_fields(struct GalleryConfig* gallery_config,
       {"input_dir", &gallery_config->input_dir, false},
       {"output_dir", &gallery_config->output_dir, false},
       {"templates_dir", &gallery_config->templates_dir, false},
-      {"assets_dir", &gallery_config->assets_dir, false},
+      {"static_dir", &gallery_config->static_dir, false},
       {"album_template", &gallery_config->album_template, false},
   };
 
@@ -847,7 +847,7 @@ static int normalize_dirs(struct GalleryConfig* gallery_config, char* err, size_
                     err_len) != 0) {
     return -1;
   }
-  return normalize_dir(&gallery_config->assets_dir, "assets_dir", &gallery_config->arena, err,
+  return normalize_dir(&gallery_config->static_dir, "static_dir", &gallery_config->arena, err,
                        err_len);
 }
 

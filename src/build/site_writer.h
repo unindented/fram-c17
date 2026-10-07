@@ -53,22 +53,22 @@ int site_writer_write_aggregates(const struct GalleryConfig* gallery_config,
                                  size_t err_len) __attribute__((nonnull(1, 2)));
 
 /**
- * @brief Copies every enumerated asset below the fixed output `assets/` directory.
+ * @brief Copies every enumerated static file below `output_dir`.
  *
- * Each asset keeps its path relative to `assets_dir`. `manifest_builder_derive_asset_output`
+ * Each static file keeps its path relative to `static_dir`. `manifest_builder_derive_static_output`
  * derives the destination, as it did for the path `manifest_builder_populate` registered.
  *
- * @param gallery_config Configuration supplying `output_dir` and `assets_dir`. Must not be `NULL`.
- * @param asset_paths    Every enumerated file below `assets_dir`, each already accepted by
- *                       `manifest_builder_populate`, which rejects a path outside `assets_dir`.
+ * @param gallery_config Configuration supplying `output_dir` and `static_dir`. Must not be `NULL`.
+ * @param static_paths   Every enumerated file below `static_dir`, each already accepted by
+ *                       `manifest_builder_populate`, which rejects a path outside `static_dir`.
  *                       Must not be `NULL`.
  * @param err            Destination buffer for a failure diagnostic.
  * @param err_len        Size of `err` in bytes.
  * @return `0` on success, or `-1` on the first allocation or copy failure.
  */
-int site_writer_copy_assets(const struct GalleryConfig* gallery_config,
-                            const struct PathList* asset_paths,
-                            char* err,
-                            size_t err_len) __attribute__((nonnull(1, 2)));
+int site_writer_copy_static_files(const struct GalleryConfig* gallery_config,
+                                  const struct PathList* static_paths,
+                                  char* err,
+                                  size_t err_len) __attribute__((nonnull(1, 2)));
 
 #endif

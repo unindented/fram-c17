@@ -25,8 +25,8 @@
  *        configuration at it.
  *
  * `input_dir` is `photos`, `output_dir` is `public`, `templates_dir` is `templates`, and
- * `assets_dir` is `assets`, each below `root_dir`. No aggregate template is configured. Only the
- * two files exist, so no source, asset, or output is present.
+ * `static_dir` is `static`, each below `root_dir`. No aggregate template is configured. Only the
+ * two files exist, so no source, static file, or output is present.
  *
  * @param root_dir       Writable `mkdtemp` template. Receives the created directory path.
  * @param arena          Arena that owns the joined paths. Must not be `NULL`.
@@ -46,7 +46,7 @@ static char* init_manifest_fixture(char* root_dir,
   gallery_config->input_dir = path_join(root_dir, "photos", arena);
   gallery_config->output_dir = path_join(root_dir, "public", arena);
   gallery_config->templates_dir = path_join(root_dir, "templates", arena);
-  gallery_config->assets_dir = path_join(root_dir, "assets", arena);
+  gallery_config->static_dir = path_join(root_dir, "static", arena);
   if (!TEST_CHECK(write_fixture_file(root_dir, "fram.toml", "title = 'x'\n") == 0)) {
     goto fail;
   }
@@ -55,7 +55,7 @@ static char* init_manifest_fixture(char* root_dir,
   }
   if (!TEST_CHECK(config_path != NULL && gallery_config->input_dir != NULL &&
                   gallery_config->output_dir != NULL && gallery_config->templates_dir != NULL &&
-                  gallery_config->assets_dir != NULL)) {
+                  gallery_config->static_dir != NULL)) {
     goto fail;
   }
   return config_path;
@@ -128,7 +128,7 @@ static void check_rejects_output_dir_in_root(const struct GalleryConfig* config,
   TEST_CHECK((access(config->output_dir, F_OK) == 0) == had_output_dir);
 }
 
-// Every album, derivative, original, aggregate, and asset output is registered exactly once.
+// Every album, derivative, original, aggregate, and static file output is registered exactly once.
 static void test_registers_complete_output_set(void) {
   char root_dir[] = "/tmp/fram-manifest-XXXXXX";
   struct Arena arena;
@@ -140,7 +140,7 @@ static void test_registers_complete_output_set(void) {
     return;
   }
   char* source_path = path_join(config.input_dir, "x.jpg", &arena);
-  char* asset_path = path_join(config.assets_dir, "a.txt", &arena);
+  char* static_path = path_join(config.static_dir, "a.txt", &arena);
   char* album_output = path_join(config.output_dir, "index.html", &arena);
   char* small = path_join(config.output_dir, "_fram/r/s/x.jpg", &arena);
   char* medium = path_join(config.output_dir, "_fram/r/m/x.jpg", &arena);
@@ -163,9 +163,9 @@ static void test_registers_complete_output_set(void) {
       .source_dir = "", .output_path = album_output, .media = media_items, .media_count = 1};
   const struct Album* albums[] = {&album};
   struct PathList sources;
-  struct PathList assets;
+  struct PathList static_paths;
   path_list_init(&sources);
-  path_list_init(&assets);
+  path_list_init(&static_paths);
   struct Manifest manifest;
   manifest_init(&manifest);
   char err[ERROR_MESSAGE_SIZE] = "";
@@ -175,22 +175,22 @@ static void test_registers_complete_output_set(void) {
   if (!TEST_CHECK(write_fixture_file(root_dir, "templates/map.xml", "map") == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "assets/a.txt", "asset") == 0)) {
+  if (!TEST_CHECK(write_fixture_file(root_dir, "static/a.txt", "static") == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(source_path != NULL && asset_path != NULL && album_output != NULL &&
+  if (!TEST_CHECK(source_path != NULL && static_path != NULL && album_output != NULL &&
                   small != NULL && medium != NULL && large != NULL && original != NULL)) {
     goto cleanup;
   }
   if (!TEST_CHECK(path_list_push(&sources, source_path) == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(path_list_push(&assets, asset_path) == 0)) {
+  if (!TEST_CHECK(path_list_push(&static_paths, static_path) == 0)) {
     goto cleanup;
   }
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &sources, &assets, albums,
-                                       1, err, sizeof(err)) == 0);
+  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &sources, &static_paths,
+                                       albums, 1, err, sizeof(err)) == 0);
   TEST_CHECK(err[0] == '\0');
   TEST_MSG("actual: '%s'", err);
   TEST_CHECK(manifest.count == 7);
@@ -198,7 +198,7 @@ static void test_registers_complete_output_set(void) {
 cleanup:
   manifest_free(&manifest);
   path_list_free(&sources);
-  path_list_free(&assets);
+  path_list_free(&static_paths);
   gallery_config_free(&config);
   arena_free(&arena);
   remove_fixture_tree(root_dir);
@@ -260,11 +260,11 @@ static void test_accepts_output_beside_input_roots(void) {
   config.output_dir = root_dir;
   char* photos_output = path_join(root_dir, "photosx/index.html", &arena);
   char* templates_output = path_join(root_dir, "templatesx/index.html", &arena);
-  char* assets_output = path_join(root_dir, "assetsx/index.html", &arena);
+  char* static_output = path_join(root_dir, "staticx/index.html", &arena);
   struct Album photos_album = {.source_dir = "a", .output_path = photos_output};
   struct Album templates_album = {.source_dir = "b", .output_path = templates_output};
-  struct Album assets_album = {.source_dir = "c", .output_path = assets_output};
-  const struct Album* albums[] = {&photos_album, &templates_album, &assets_album};
+  struct Album static_album = {.source_dir = "c", .output_path = static_output};
+  const struct Album* albums[] = {&photos_album, &templates_album, &static_album};
   struct PathList empty;
   path_list_init(&empty);
   struct Manifest manifest;
@@ -273,13 +273,13 @@ static void test_accepts_output_beside_input_roots(void) {
   if (!TEST_CHECK(write_fixture_file(root_dir, "photos/x.jpg", "source") == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "assets/a.css", "asset") == 0)) {
+  if (!TEST_CHECK(write_fixture_file(root_dir, "static/a.css", "static") == 0)) {
     goto cleanup;
   }
   if (!TEST_CHECK(write_fixture_file(root_dir, "photosx/old.html", "old") == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(photos_output != NULL && templates_output != NULL && assets_output != NULL)) {
+  if (!TEST_CHECK(photos_output != NULL && templates_output != NULL && static_output != NULL)) {
     goto cleanup;
   }
 
@@ -317,7 +317,7 @@ static void test_check_output_dir_accepts_dir_outside_input_roots(void) {
   if (!TEST_CHECK(write_fixture_file(root_dir, "photos/x.jpg", "source") == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "assets/a.css", "asset") == 0)) {
+  if (!TEST_CHECK(write_fixture_file(root_dir, "static/a.css", "static") == 0)) {
     goto cleanup;
   }
   for (size_t i = 0; i < sizeof(output_dirs) / sizeof(output_dirs[0]); i++) {
@@ -349,14 +349,14 @@ static void test_derive_template_output_joins_output_dir(void) {
   arena_free(&arena);
 }
 
-// An asset's output path keeps its path below `assets_dir`, rooted at the output `assets/`
-// directory. `site_writer` copies to this same path, so it is the one the manifest checked.
-static void test_derive_asset_output_joins_output_assets_dir(void) {
+// A static file's output path keeps its path below `static_dir`, rooted directly at `output_dir`.
+// `site_writer` copies to this same path, so it is the one the manifest checked.
+static void test_derive_static_output_joins_output_dir(void) {
   struct Arena arena;
   arena_init(&arena);
-  const char* output = manifest_builder_derive_asset_output("public", "icons/a.svg", &arena);
+  const char* output = manifest_builder_derive_static_output("public", "icons/a.svg", &arena);
   TEST_ASSERT(output != NULL);
-  TEST_CHECK(strcmp(output, "public/assets/icons/a.svg") == 0);
+  TEST_CHECK(strcmp(output, "public/icons/a.svg") == 0);
   arena_free(&arena);
 }
 
@@ -639,9 +639,9 @@ static void test_rejects_input_overwrite(void) {
       .source_dir = "", .output_path = album_output, .media = media_items, .media_count = 1};
   const struct Album* albums[] = {&album};
   struct PathList sources;
-  struct PathList assets;
+  struct PathList static_paths;
   path_list_init(&sources);
-  path_list_init(&assets);
+  path_list_init(&static_paths);
   struct Manifest manifest;
   manifest_init(&manifest);
   char err[ERROR_MESSAGE_SIZE] = "";
@@ -664,8 +664,8 @@ static void test_rejects_input_overwrite(void) {
     goto cleanup;
   }
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &sources, &assets, albums,
-                                       1, err, sizeof(err)) == -1);
+  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &sources, &static_paths,
+                                       albums, 1, err, sizeof(err)) == -1);
   expected_len =
       snprintf(expected, sizeof(expected), "output path would overwrite build input for '%s': '%s'",
                source_path, original);
@@ -677,7 +677,7 @@ static void test_rejects_input_overwrite(void) {
 cleanup:
   manifest_free(&manifest);
   path_list_free(&sources);
-  path_list_free(&assets);
+  path_list_free(&static_paths);
   gallery_config_free(&config);
   arena_free(&arena);
   remove_fixture_tree(root_dir);
@@ -701,9 +701,9 @@ static void test_rejects_input_overwrite_among_many_inputs(void) {
   char* existing_output = path_join(config.output_dir, "existing.jpg", &arena);
   char* album_output = path_join(config.output_dir, "index.html", &arena);
   struct PathList sources;
-  struct PathList assets;
+  struct PathList static_paths;
   path_list_init(&sources);
-  path_list_init(&assets);
+  path_list_init(&static_paths);
   if (!TEST_CHECK(write_fixture_file(root_dir, "public/existing.jpg", "output") == 0)) {
     goto cleanup;
   }
@@ -756,8 +756,8 @@ static void test_rejects_input_overwrite_among_many_inputs(void) {
     manifest_init(&manifest);
     char err[ERROR_MESSAGE_SIZE] = "";
 
-    TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &sources, &assets, albums,
-                                         1, err, sizeof(err)) == -1);
+    TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &sources, &static_paths,
+                                         albums, 1, err, sizeof(err)) == -1);
     TEST_CHECK(strcmp(err, expected) == 0);
     TEST_MSG("target %zu: '%s'", targets[i], err);
     manifest_free(&manifest);
@@ -765,7 +765,7 @@ static void test_rejects_input_overwrite_among_many_inputs(void) {
 
 cleanup:
   path_list_free(&sources);
-  path_list_free(&assets);
+  path_list_free(&static_paths);
   gallery_config_free(&config);
   arena_free(&arena);
   remove_fixture_tree(root_dir);
@@ -935,7 +935,7 @@ static void test_check_output_dir_rejects_dir_in_input_root(void) {
   if (!TEST_CHECK(write_fixture_file(root_dir, "photos/public/old.html", "old") == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "assets/a.css", "asset") == 0)) {
+  if (!TEST_CHECK(write_fixture_file(root_dir, "static/a.css", "static") == 0)) {
     goto cleanup;
   }
   if (!TEST_CHECK(input_link != NULL)) {
@@ -955,11 +955,11 @@ static void test_check_output_dir_rejects_dir_in_input_root(void) {
     goto cleanup;
   }
   check_rejects_output_dir_in_root(&config, "templates_dir");
-  config.output_dir = path_join(root_dir, "assets/generated", &arena);
+  config.output_dir = path_join(root_dir, "static/generated", &arena);
   if (!TEST_CHECK(config.output_dir != NULL)) {
     goto cleanup;
   }
-  check_rejects_output_dir_in_root(&config, "assets_dir");
+  check_rejects_output_dir_in_root(&config, "static_dir");
 
 cleanup:
   gallery_config_free(&config);
@@ -1102,9 +1102,9 @@ cleanup:
   remove_fixture_tree(root_dir);
 }
 
-// An output that would land below `assets_dir` is rejected, because the next build would copy it as
-// an asset.
-static void test_rejects_output_in_assets_dir(void) {
+// An output that would land below `static_dir` is rejected, because the next build would copy it as
+// a static file.
+static void test_rejects_output_in_static_dir(void) {
   char root_dir[] = "/tmp/fram-manifest-XXXXXX";
   struct Arena arena;
   arena_init(&arena);
@@ -1114,12 +1114,12 @@ static void test_rejects_output_in_assets_dir(void) {
     arena_free(&arena);
     return;
   }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "assets/a.css", "asset") == 0)) {
+  if (!TEST_CHECK(write_fixture_file(root_dir, "static/a.css", "static") == 0)) {
     goto cleanup;
   }
   config.output_dir = root_dir;
-  check_rejects_output_in_root(&config, config_path, path_join(root_dir, "assets/b.html", &arena),
-                               "assets_dir");
+  check_rejects_output_in_root(&config, config_path, path_join(root_dir, "static/b.html", &arena),
+                               "static_dir");
 
 cleanup:
   gallery_config_free(&config);
@@ -1295,10 +1295,10 @@ cleanup:
   remove_fixture_tree(root_dir);
 }
 
-// An enumerated asset that does not lie below `assets_dir` has no output below `assets/`, so it is
-// rejected rather than registered at a path the copy would not reproduce. The sibling directory
-// shares `assets` as a text prefix, so only the separator check tells the two apart.
-static void test_rejects_asset_not_below_root(void) {
+// An enumerated static file that does not lie below `static_dir` has no path relative to it, so it
+// is rejected rather than registered at a path the copy would not reproduce. The sibling directory
+// shares `static` as a text prefix, so only the separator check tells the two apart.
+static void test_rejects_static_file_not_below_root(void) {
   char root_dir[] = "/tmp/fram-manifest-XXXXXX";
   struct Arena arena;
   arena_init(&arena);
@@ -1309,29 +1309,30 @@ static void test_rejects_asset_not_below_root(void) {
     return;
   }
   char* album_output = path_join(config.output_dir, "index.html", &arena);
-  char* asset_path = path_join(root_dir, "assets-old/a.txt", &arena);
+  char* static_path = path_join(root_dir, "static-old/a.txt", &arena);
   struct Album album = {.source_dir = "", .output_path = album_output};
   const struct Album* albums[] = {&album};
   struct PathList sources;
-  struct PathList assets;
+  struct PathList static_paths;
   path_list_init(&sources);
-  path_list_init(&assets);
+  path_list_init(&static_paths);
   struct Manifest manifest;
   manifest_init(&manifest);
   char err[ERROR_MESSAGE_SIZE] = "";
   char expected[ERROR_MESSAGE_SIZE];
   int expected_len = 0;
-  if (!TEST_CHECK(album_output != NULL && asset_path != NULL)) {
+  if (!TEST_CHECK(album_output != NULL && static_path != NULL)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(path_list_push(&assets, asset_path) == 0)) {
+  if (!TEST_CHECK(path_list_push(&static_paths, static_path) == 0)) {
     goto cleanup;
   }
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &sources, &assets, albums,
-                                       1, err, sizeof(err)) == -1);
-  expected_len = snprintf(expected, sizeof(expected),
-                          "asset path is not below configured assets directory: '%s'", asset_path);
+  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &sources, &static_paths,
+                                       albums, 1, err, sizeof(err)) == -1);
+  expected_len =
+      snprintf(expected, sizeof(expected),
+               "static file path is not below configured static directory: '%s'", static_path);
   if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
     goto cleanup;
   }
@@ -1340,7 +1341,7 @@ static void test_rejects_asset_not_below_root(void) {
 cleanup:
   manifest_free(&manifest);
   path_list_free(&sources);
-  path_list_free(&assets);
+  path_list_free(&static_paths);
   gallery_config_free(&config);
   arena_free(&arena);
   remove_fixture_tree(root_dir);
@@ -1357,8 +1358,7 @@ TEST_LIST = {
     {"check output dir accepts dir outside input roots",
      test_check_output_dir_accepts_dir_outside_input_roots},
     {"derive template output joins output dir", test_derive_template_output_joins_output_dir},
-    {"derive asset output joins output assets dir",
-     test_derive_asset_output_joins_output_assets_dir},
+    {"derive static output joins output dir", test_derive_static_output_joins_output_dir},
     {"rejects duplicate", test_rejects_duplicate},
     {"rejects case folded duplicate", test_rejects_case_folded_duplicate},
     {"rejects prefix collision", test_rejects_prefix_collision},
@@ -1371,10 +1371,10 @@ TEST_LIST = {
     {"check output dir rejects dir in input root", test_check_output_dir_rejects_dir_in_input_root},
     {"rejects output in input dir", test_rejects_output_in_input_dir},
     {"rejects output in templates dir", test_rejects_output_in_templates_dir},
-    {"rejects output in assets dir", test_rejects_output_in_assets_dir},
+    {"rejects output in static dir", test_rejects_output_in_static_dir},
     {"rejects unlistable templates dir", test_rejects_unlistable_templates_dir},
     {"rejects oversize template path", test_rejects_oversize_template_path},
     {"rejects oversize template segment", test_rejects_oversize_template_segment},
-    {"rejects asset not below root", test_rejects_asset_not_below_root},
+    {"rejects static file not below root", test_rejects_static_file_not_below_root},
     {NULL, NULL},
 };

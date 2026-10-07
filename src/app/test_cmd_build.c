@@ -253,7 +253,7 @@ cleanup:
 }
 
 // A build writes exactly the manifest's intended outputs: album pages, derivatives, originals,
-// aggregate outputs and assets, and nothing for a file in `input_dir` that is not media.
+// aggregate outputs and static files, and nothing for a file in `input_dir` that is not media.
 static void test_writes_exactly_manifest_outputs(void) {
   char root_dir_template[] = "/tmp/fram-build-manifest-outputs.XXXXXX";
   const char* root_dir = init_fixture_dir(root_dir_template);
@@ -265,7 +265,7 @@ static void test_writes_exactly_manifest_outputs(void) {
       "public/_fram/v1-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.jpg",
       "public/_fram/v1-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.jpg",
       "public/album/index.html",
-      "public/assets/fram.css",
+      "public/fram.css",
       "public/index.html",
       "public/sitemap.xml",
   };
@@ -291,7 +291,7 @@ static void test_writes_exactly_manifest_outputs(void) {
   if (!TEST_CHECK(write_fixture_file(root_dir, "photos/album/notes.txt", "not media\n") == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "assets/fram.css", "body{}\n") == 0)) {
+  if (!TEST_CHECK(write_fixture_file(root_dir, "static/fram.css", "body{}\n") == 0)) {
     goto cleanup;
   }
 
@@ -393,10 +393,10 @@ cleanup:
   remove_fixture_tree(root_dir);
 }
 
-// A gallery that ships no `assets` directory builds. `assets_dir` is optional with a default, so an
+// A gallery that ships no `static` directory builds. `static_dir` is optional with a default, so an
 // absent one is skipped rather than reported.
-static void test_builds_with_no_assets_dir(void) {
-  char root_dir_template[] = "/tmp/fram-build-no-assets.XXXXXX";
+static void test_builds_with_no_static_dir(void) {
+  char root_dir_template[] = "/tmp/fram-build-no-static.XXXXXX";
   const char* root_dir = init_fixture_dir(root_dir_template);
   if (root_dir == NULL) {
     return;
@@ -409,7 +409,7 @@ static void test_builds_with_no_assets_dir(void) {
   if (!TEST_CHECK(write_fixture_jpeg(root_dir, "photos/album/one.jpg") == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(!fixture_path_exists(root_dir, "assets"))) {
+  if (!TEST_CHECK(!fixture_path_exists(root_dir, "static"))) {
     goto cleanup;
   }
 
@@ -425,9 +425,10 @@ cleanup:
   remove_fixture_tree(root_dir);
 }
 
-// An `assets` directory is mirrored below `output_dir`, nested paths included.
-static void test_copies_assets_when_present(void) {
-  char root_dir_template[] = "/tmp/fram-build-assets.XXXXXX";
+// A `static` directory is mirrored into `output_dir` as-is, so a top-level file lands at the output
+// root and a nested one keeps its directories.
+static void test_copies_static_files_when_present(void) {
+  char root_dir_template[] = "/tmp/fram-build-static.XXXXXX";
   const char* root_dir = init_fixture_dir(root_dir_template);
   if (root_dir == NULL) {
     return;
@@ -440,18 +441,18 @@ static void test_copies_assets_when_present(void) {
   if (!TEST_CHECK(write_fixture_jpeg(root_dir, "photos/album/one.jpg") == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "assets/fram.css", "body{}\n") == 0)) {
+  if (!TEST_CHECK(write_fixture_file(root_dir, "static/robots.txt", "User-agent: *\n") == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "assets/deep/extra.css", "main{}\n") == 0)) {
+  if (!TEST_CHECK(write_fixture_file(root_dir, "static/assets/fram.css", "body{}\n") == 0)) {
     goto cleanup;
   }
 
   TEST_CHECK(execute_build_in_dir(root_dir, &error_buffer) == 0);
   TEST_CHECK(error_buffer.len == 0);
   TEST_MSG("actual: '%s'", error_buffer.data != NULL ? error_buffer.data : "");
+  TEST_CHECK(fixture_path_exists(root_dir, "public/robots.txt"));
   TEST_CHECK(fixture_path_exists(root_dir, "public/assets/fram.css"));
-  TEST_CHECK(fixture_path_exists(root_dir, "public/assets/deep/extra.css"));
 
 cleanup:
   string_buffer_free(&error_buffer);
@@ -700,7 +701,7 @@ static void test_honors_requested_worker_count(void) {
   expected_len = snprintf(expected, sizeof(expected),
                           "loading config\n"
                           "discovering media\n"
-                          "discovering assets\n"
+                          "discovering static files\n"
                           "planning albums\n"
                           "probing media, workers: %d\n"
                           "\rprobing media 1/1\n"
@@ -711,7 +712,7 @@ static void test_honors_requested_worker_count(void) {
                           "\rrendering albums 1/1\n"
                           "writing album pages\n"
                           "rendering aggregate templates\n"
-                          "copying assets\n"
+                          "copying static files\n"
                           "build complete\n",
                           3, 3, 3);
   if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
@@ -729,7 +730,7 @@ static void test_honors_requested_worker_count(void) {
   expected_len = snprintf(expected, sizeof(expected),
                           "loading config\n"
                           "discovering media\n"
-                          "discovering assets\n"
+                          "discovering static files\n"
                           "planning albums\n"
                           "probing media, workers: %d\n"
                           "\rprobing media 1/1\n"
@@ -740,7 +741,7 @@ static void test_honors_requested_worker_count(void) {
                           "\rrendering albums 1/1\n"
                           "writing album pages\n"
                           "rendering aggregate templates\n"
-                          "copying assets\n"
+                          "copying static files\n"
                           "build complete\n",
                           1, 1, 1);
   if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
@@ -789,14 +790,14 @@ static void test_skips_empty_phases_in_verbose_output(void) {
   TEST_CHECK(strcmp(stderr_out,
                     "loading config\n"
                     "discovering media\n"
-                    "discovering assets\n"
+                    "discovering static files\n"
                     "planning albums\n"
                     "building output manifest\n"
                     "rendering albums, workers: 3\n"
                     "\rrendering albums 1/1\n"
                     "writing album pages\n"
                     "rendering aggregate templates\n"
-                    "copying assets\n"
+                    "copying static files\n"
                     "build complete\n") == 0);
   TEST_MSG("actual: '%s'", stderr_out);
 
@@ -1144,6 +1145,39 @@ cleanup:
   remove_fixture_tree(root_dir);
 }
 
+// A static file copied to the output root shares its paths with the generated pages, so one named
+// after the root album page is rejected as a duplicate of it rather than overwriting it or being
+// overwritten. The refused build creates no `output_dir`.
+static void test_rejects_static_file_colliding_with_album_page(void) {
+  char root_dir_template[] = "/tmp/fram-build-static-collision.XXXXXX";
+  const char* root_dir = init_fixture_dir(root_dir_template);
+  if (root_dir == NULL) {
+    return;
+  }
+  struct StringBuffer error_buffer;
+  string_buffer_init(&error_buffer);
+  if (!TEST_CHECK(write_gallery_fixture(root_dir, NULL) == 0)) {
+    goto cleanup;
+  }
+  if (!TEST_CHECK(write_fixture_jpeg(root_dir, "photos/album/one.jpg") == 0)) {
+    goto cleanup;
+  }
+  if (!TEST_CHECK(write_fixture_file(root_dir, "static/index.html", "static\n") == 0)) {
+    goto cleanup;
+  }
+
+  TEST_CHECK(execute_build_in_dir(root_dir, &error_buffer) == -1);
+  TEST_CHECK(error_buffer.data != NULL && strcmp(error_buffer.data,
+                                                 "duplicate output path for 'photos' and "
+                                                 "'static/index.html': 'public/index.html'") == 0);
+  TEST_MSG("actual: '%s'", error_buffer.data != NULL ? error_buffer.data : "");
+  TEST_CHECK(!fixture_path_exists(root_dir, "public"));
+
+cleanup:
+  string_buffer_free(&error_buffer);
+  remove_fixture_tree(root_dir);
+}
+
 // An album template that fails to parse fails the build at the page phase. The diagnostic carries
 // the parser's cause, its position and the template name, followed by the album that was being
 // rendered, so a template error reads apart from a template that cannot be read. No other test here
@@ -1265,12 +1299,12 @@ cleanup:
   remove_fixture_tree(root_dir);
 }
 
-// An `assets_dir` that exists but is a regular file is reported. Skipping an absent optional root
+// A `static_dir` that exists but is a regular file is reported. Skipping an absent optional root
 // must not also skip a misconfigured one, which is why the existence predicate asks whether
 // anything is there rather than whether a directory is there: the wrong type survives the skip and
 // reaches `fs_require_dir`, which names it.
-static void test_reports_assets_dir_that_is_a_file(void) {
-  char root_dir_template[] = "/tmp/fram-build-assets-file.XXXXXX";
+static void test_reports_static_dir_that_is_a_file(void) {
+  char root_dir_template[] = "/tmp/fram-build-static-file.XXXXXX";
   const char* root_dir = init_fixture_dir(root_dir_template);
   if (root_dir == NULL) {
     return;
@@ -1283,15 +1317,15 @@ static void test_reports_assets_dir_that_is_a_file(void) {
   if (!TEST_CHECK(write_fixture_jpeg(root_dir, "photos/album/one.jpg") == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "assets", "not a directory\n") == 0)) {
+  if (!TEST_CHECK(write_fixture_file(root_dir, "static", "not a directory\n") == 0)) {
     goto cleanup;
   }
 
   TEST_CHECK(execute_build_in_dir(root_dir, &error_buffer) == -1);
   TEST_CHECK(error_buffer.data != NULL &&
              strcmp(error_buffer.data,
-                    "failed to resolve config directory 'assets_dir': not a directory "
-                    "('assets')") == 0);
+                    "failed to resolve config directory 'static_dir': not a directory "
+                    "('static')") == 0);
 
 cleanup:
   string_buffer_free(&error_buffer);
@@ -1302,8 +1336,8 @@ TEST_LIST = {
     {"honors configured album template", test_honors_configured_album_template},
     {"writes exactly manifest outputs", test_writes_exactly_manifest_outputs},
     {"tolerates trailing slash on input_dir", test_tolerates_trailing_slash_on_input_dir},
-    {"builds with no assets dir", test_builds_with_no_assets_dir},
-    {"copies assets when present", test_copies_assets_when_present},
+    {"builds with no static dir", test_builds_with_no_static_dir},
+    {"copies static files when present", test_copies_static_files_when_present},
     {"distinguishes same name in different dirs", test_distinguishes_same_name_in_different_dirs},
     {"builds an album with no media of its own", test_builds_an_album_with_no_media_of_its_own},
     {"rebuild succeeds and repeats its outputs", test_rebuild_succeeds_and_repeats_its_outputs},
@@ -1323,9 +1357,11 @@ TEST_LIST = {
     {"reports dangling output dir symlink", test_reports_dangling_output_dir_symlink},
     {"rejects output dir inside input dir", test_rejects_output_dir_inside_input_dir},
     {"rejects colliding source names", test_rejects_colliding_source_names},
+    {"rejects static file colliding with album page",
+     test_rejects_static_file_colliding_with_album_page},
     {"reports bad template", test_reports_bad_template},
     {"reports one line per failing media item", test_reports_one_line_per_failing_media_item},
     {"reports unwritable output", test_reports_unwritable_output},
-    {"reports assets dir that is a file", test_reports_assets_dir_that_is_a_file},
+    {"reports static dir that is a file", test_reports_static_dir_that_is_a_file},
     {NULL, NULL},
 };

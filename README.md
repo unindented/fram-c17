@@ -38,8 +38,10 @@ media/
     photo-1.jpg
     video-1.mp4
   photo-2.jpeg
-assets/
-  gallery.css
+static/
+  robots.txt
+  assets/
+    gallery.css
 templates/
   partials/
     header.html
@@ -50,24 +52,26 @@ fram.toml
 
 `fram.toml` must contain the required metadata fields. The example below also shows the default values for optional fields. It lists every key the file can contain. The tool rejects any other key, including one inside a derivative table, so a misspelled key such as `ouput_dir` fails the load instead of leaving the default in place.
 
-The tool removes trailing `/` characters from `input_dir`, `output_dir`, `templates_dir`, and `assets_dir`. These fields must not be empty. Each field can contain an absolute or parent-relative path.
+The tool removes trailing `/` characters from `input_dir`, `output_dir`, `templates_dir`, and `static_dir`. These fields must not be empty. Each field can contain an absolute or parent-relative path.
 
 The build searches all directories under `input_dir` for regular files that end in `.jpg`, `.jpeg`, or `.mp4`, matched ASCII case-insensitively. It creates `output_dir` and all required output subdirectories. It overwrites each output file that the current build generates. It skips a current derivative or original copy using source and output metadata.
 
-The searches of `input_dir` and `assets_dir` follow symlinked directories but read each directory only once. A directory that more than one path reaches publishes its files once, not once per path. For example, with `album` a symlink to `trips`, the media publish only under `trips`. The build prefers the path that uses no symlink. For a directory that only symlinks reach, it uses the first such path in byte order. A symlink back into its own parent directories is skipped.
+The searches of `input_dir` and `static_dir` follow symlinked directories but read each directory only once. A directory that more than one path reaches publishes its files once, not once per path. For example, with `album` a symlink to `trips`, the media publish only under `trips`. The build prefers the path that uses no symlink. For a directory that only symlinks reach, it uses the first such path in byte order. A symlink back into its own parent directories is skipped.
 
-The media and template directories must exist. The asset directory is optional: a gallery that ships none builds without it.
+The media and template directories must exist. The static directory is optional: a gallery that ships none builds without it.
+
+The build copies every file below `static_dir` into `output_dir` as-is, keeping its path relative to `static_dir`. A top-level file such as `static/robots.txt` lands at `output_dir/robots.txt`, and `static/assets/gallery.css` lands at `output_dir/assets/gallery.css`. A static file that names the same output path as a generated page, derivative, or aggregate template output is rejected as a conflict, not overwritten.
 
 The build rejects an input file that is too large before it reads the file: a JPEG source or video poster frame over 2,147,483,647 bytes (the decoder's input limit, just under 2 GiB), a config file over 1 MiB, or a template or partial over 4 MiB. The error message gives the limit and the file size.
 
-Before the tool searches `input_dir`, it rejects an `output_dir` at or below `input_dir`, `templates_dir`, or `assets_dir`, whether or not `output_dir` exists yet. The check compares directories, not path text, so it also catches another spelling of a directory or a symlink to it. An `output_dir` that holds the input directories, such as `output_dir = "."`, is allowed. Every search of an input directory skips `output_dir`, so a symlink that leads into it cannot feed generated files back in as inputs.
+Before the tool searches `input_dir`, it rejects an `output_dir` at or below `input_dir`, `templates_dir`, or `static_dir`, whether or not `output_dir` exists yet. The check compares directories, not path text, so it also catches another spelling of a directory or a symlink to it. An `output_dir` that holds the input directories, such as `output_dir = "."`, is allowed. Every search of an input directory skips `output_dir`, so a symlink that leads into it cannot feed generated files back in as inputs.
 
 Before the tool renders page templates or writes output files, it rejects an output plan with one of these conflicts:
 
 - Two producers use the same output path. Paths that differ only in ASCII letter case, such as `assets/Logo.png` and `assets/logo.png`, count as the same path, because a case-insensitive filesystem such as the macOS default stores them as one file.
 - One output path must be both a file and a directory. This check also ignores ASCII letter case.
-- An output is at or below `input_dir`, `templates_dir`, or `assets_dir`, even if no file exists at that path yet, such as through a symlink inside `output_dir`. Otherwise the next build would read a generated image as a media source or copy a generated file as an asset, and a template could include a generated partial in the same build. The check compares directories, not path text, so it also catches another spelling of a directory or a symlink to it.
-- An output overwrites the config, a media source, an asset, or any file below `templates_dir`, including partials.
+- An output is at or below `input_dir`, `templates_dir`, or `static_dir`, even if no file exists at that path yet, such as through a symlink inside `output_dir`. Otherwise the next build would read a generated image as a media source or copy a generated file as a static file, and a template could include a generated partial in the same build. The check compares directories, not path text, so it also catches another spelling of a directory or a symlink to it.
+- An output overwrites the config, a media source, a static file, or any file below `templates_dir`, including partials.
 
 The build creates `output_dir` only after these checks pass, so a rejected build creates nothing. The build does not remove stale files from an earlier build. If rendering or writing fails partway, some outputs can be new while others remain unchanged.
 
@@ -92,8 +96,8 @@ output_dir = "public"
 # Directory containing templates and partials.
 templates_dir = "templates"
 
-# Directory containing files copied recursively below `output_dir/assets`.
-assets_dir = "assets"
+# Directory containing files copied recursively into `output_dir` as-is.
+static_dir = "static"
 
 # Template used for every album page.
 album_template = "album.html"
@@ -163,7 +167,7 @@ A partial reference loads `templates_dir/partials/<name>.html`. The name can con
 {{> footer}}
 ```
 
-The repository and release archives do not include starter templates or assets. A gallery project must provide its own.
+The repository and release archives do not include starter templates or static files. A gallery project must provide its own.
 
 ## Contributing
 

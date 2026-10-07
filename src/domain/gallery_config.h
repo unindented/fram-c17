@@ -70,8 +70,8 @@ struct GalleryConfig {
   /** Directory containing templates. Defaults to `templates`. */
   const char* templates_dir;
 
-  /** Directory containing static assets copied into `output_dir`. Defaults to `assets`. */
-  const char* assets_dir;
+  /** Directory containing static files copied as-is into `output_dir`. Defaults to `static`. */
+  const char* static_dir;
 
   /** Safe relative template name for every album page. Defaults to `album.html`. */
   const char* album_template;

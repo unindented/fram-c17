@@ -156,7 +156,7 @@ static void test_config_command_is_dispatched(void) {
                     "input_dir = \"media\"\n"
                     "output_dir = \"public\"\n"
                     "templates_dir = \"templates\"\n"
-                    "assets_dir = \"assets\"\n"
+                    "static_dir = \"static\"\n"
                     "album_template = \"album.html\"\n"
                     "aggregate_templates = []\n"
                     "derivatives = { s = { width = 120, height = 120, quality = 70, crop = true }, "
@@ -189,14 +189,14 @@ static void test_build_command_receives_parsed_options(void) {
   TEST_CHECK(strcmp(dispatch_out.stderr_out,
                     "loading config\n"
                     "discovering media\n"
-                    "discovering assets\n"
+                    "discovering static files\n"
                     "planning albums\n"
                     "building output manifest\n"
                     "rendering albums, workers: 3\n"
                     "\rrendering albums 1/1\n"
                     "writing album pages\n"
                     "rendering aggregate templates\n"
-                    "copying assets\n"
+                    "copying static files\n"
                     "build complete\n") == 0);
   TEST_CHECK(access("public/index.html", F_OK) == 0);
 

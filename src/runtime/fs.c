@@ -442,10 +442,10 @@ int fs_copy_file(const char* source_path, const char* dest_path, char* reason, s
 
   int dest_fd = -1;
   if (rc == 0) {
-    // The copy deliberately does not carry the source's mode over. A published asset gets the same
-    // `0666`-minus-umask treatment as every other file this module creates, rather than inheriting
-    // whatever the source tree happened to have, which would let a `0600` stylesheet publish
-    // unreadable.
+    // The copy deliberately does not carry the source's mode over. A published static file gets the
+    // same `0666`-minus-umask treatment as every other file this module creates, rather than
+    // inheriting whatever the source tree happened to have, which would let a `0600` stylesheet
+    // publish unreadable.
     dest_fd = open(dest_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (dest_fd < 0) {
       rc = fs_reason_errno(reason, reason_len, errno);

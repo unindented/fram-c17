@@ -43,8 +43,8 @@ struct BuildState {
   /** Discovered media source paths below `input_dir`, sorted by the walk that produced them. */
   struct PathList source_paths;
 
-  /** Discovered asset paths below `assets_dir`, left empty when that directory is absent. */
-  struct PathList asset_paths;
+  /** Discovered static file paths below `static_dir`, left empty when that directory is absent. */
+  struct PathList static_paths;
 
   /** Intended output paths for this build, populated before any file is written. */
   struct Manifest manifest;
@@ -119,13 +119,13 @@ static void build_state_free(struct BuildState* state) __attribute__((nonnull(1)
 
 /**
  * @brief Loads `fram.toml`, rejects an `output_dir` inside an input tree, and discovers media and
- *        asset sources.
+ *        static files.
  *
  * The `output_dir` check runs before either walk, and both walks leave `output_dir` out, so a file
  * an earlier build generated is never read back as a source.
  *
- * @param state   Build state that receives the configuration, media source paths, and asset paths.
- *                Must not be `NULL`.
+ * @param state   Build state that receives the configuration, media source paths, and static file
+ *                paths. Must not be `NULL`.
  * @param err     Destination buffer for a failure diagnostic.
  * @param err_len Size of `err` in bytes.
  * @return `0` on success, or `-1` on a configuration, directory, output directory, listing, or
@@ -249,10 +249,10 @@ static int render_album_pages(struct BuildState* state, struct StringBuffer* err
     __attribute__((nonnull(1, 2)));
 
 /**
- * @brief Writes the album pages, the aggregate template outputs, and the copied assets.
+ * @brief Writes the album pages, the aggregate template outputs, and the copied static files.
  *
- * @param state   Build state holding the rendered pages, the scanned albums, and the asset paths.
- *                Must not be `NULL`.
+ * @param state   Build state holding the rendered pages, the scanned albums, and the static file
+ * paths. Must not be `NULL`.
  * @param err     Destination buffer for a failure diagnostic.
  * @param err_len Size of `err` in bytes.
  * @return `0` when every output was written, or `-1` on the first render or write failure.
@@ -379,7 +379,7 @@ static void build_state_free(struct BuildState* state) {
   free(state->video_frame_paths);
   album_scanner_free_skeleton(state->albums, state->album_count, state->media);
   manifest_free(&state->manifest);
-  path_list_free(&state->asset_paths);
+  path_list_free(&state->static_paths);
   path_list_free(&state->source_paths);
   gallery_config_free(&state->gallery_config);
   *state = (struct BuildState){0};
@@ -408,17 +408,17 @@ static int load_build_inputs(struct BuildState* state, char* err, size_t err_len
     // configured root, so the root is not repeated here.
     return error_report(err, err_len, "failed to list source media: %s", reason);
   }
-  build_verbose(state, "discovering assets");
-  // An absent `assets_dir` leaves `asset_paths` empty rather than failing the build. A gallery that
-  // ships no stylesheet is a supported configuration, and the walk stats its root before
-  // descending, so calling it here would turn "no assets" into a failed build. `require_read_roots`
-  // skips the same directory on the same condition.
-  static const char* const asset_suffixes[] = {""};
-  if (fs_path_exists(state->gallery_config.assets_dir) &&
-      fs_list_files_with_suffixes(&state->asset_paths, state->gallery_config.assets_dir,
-                                  state->gallery_config.output_dir, asset_suffixes, 1, false,
+  build_verbose(state, "discovering static files");
+  // An absent `static_dir` leaves `static_paths` empty rather than failing the build. A gallery
+  // that ships no stylesheet is a supported configuration, and the walk stats its root before
+  // descending, so calling it here would turn "no static files" into a failed build.
+  // `require_read_roots` skips the same directory on the same condition.
+  static const char* const static_suffixes[] = {""};
+  if (fs_path_exists(state->gallery_config.static_dir) &&
+      fs_list_files_with_suffixes(&state->static_paths, state->gallery_config.static_dir,
+                                  state->gallery_config.output_dir, static_suffixes, 1, false,
                                   reason, sizeof(reason)) != 0) {
-    return error_report(err, err_len, "failed to list assets: %s", reason);
+    return error_report(err, err_len, "failed to list static files: %s", reason);
   }
   if (require_video_tools(&state->source_paths, err, err_len) != 0) {
     return -1;
@@ -430,7 +430,7 @@ static int require_read_roots(const struct BuildState* state, char* err, size_t 
   const struct ReadRoot roots[] = {
       {state->gallery_config.input_dir, "input_dir", false},
       {state->gallery_config.templates_dir, "templates_dir", false},
-      {state->gallery_config.assets_dir, "assets_dir", true},
+      {state->gallery_config.static_dir, "static_dir", true},
   };
   char reason[FS_REASON_SIZE];
   for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
@@ -515,7 +515,7 @@ static int populate_output_manifest(struct BuildState* state, char* err, size_t 
   // allocating into another album's arena.
   return manifest_builder_populate(&state->manifest, &state->gallery_config,
                                    GALLERY_CONFIG_PATH_DEFAULT, &state->source_paths,
-                                   &state->asset_paths, (const struct Album* const*)state->albums,
+                                   &state->static_paths, (const struct Album* const*)state->albums,
                                    state->album_count, err, err_len);
 }
 
@@ -556,6 +556,6 @@ static int write_generated_site(struct BuildState* state, char* err, size_t err_
   if (site_writer_write_aggregates(&state->gallery_config, state->albums[0], err, err_len) != 0) {
     return -1;
   }
-  build_verbose(state, "copying assets");
-  return site_writer_copy_assets(&state->gallery_config, &state->asset_paths, err, err_len);
+  build_verbose(state, "copying static files");
+  return site_writer_copy_static_files(&state->gallery_config, &state->static_paths, err, err_len);
 }

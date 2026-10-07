@@ -37,7 +37,7 @@ static void check_file_text(const char* path, const char* expected) {
   free(bytes);
 }
 
-// Album pages, aggregate templates, and nested assets land at their planned destinations.
+// Album pages, aggregate templates, and nested static files land at their planned destinations.
 static void test_writes_complete_output_layer(void) {
   char root_dir_template[] = "/tmp/fram-writer-output-layer.XXXXXX";
   const char* root_dir = init_fixture_dir(root_dir_template);
@@ -48,12 +48,12 @@ static void test_writes_complete_output_layer(void) {
   arena_init(&paths);
   char* output_dir = path_join(root_dir, "public", &paths);
   char* templates_dir = path_join(root_dir, "templates", &paths);
-  char* assets_dir = path_join(root_dir, "assets", &paths);
+  char* static_dir = path_join(root_dir, "static", &paths);
   char* root_output = path_join(output_dir, "index.html", &paths);
-  char* asset_source = path_join(assets_dir, "icons/a.txt", &paths);
+  char* static_source = path_join(static_dir, "icons/a.txt", &paths);
   char* aggregate_output = path_join(output_dir, "map.xml", &paths);
   char* nested_output = path_join(output_dir, "nested/links.html", &paths);
-  char* asset_output = path_join(output_dir, "assets/icons/a.txt", &paths);
+  char* static_output = path_join(output_dir, "icons/a.txt", &paths);
   static const char* const aggregates[] = {"map.xml", "nested/links.html"};
   struct GalleryConfig config;
   gallery_config_init(&config);
@@ -61,7 +61,7 @@ static void test_writes_complete_output_layer(void) {
   config.author = "Ada";
   config.output_dir = output_dir;
   config.templates_dir = templates_dir;
-  config.assets_dir = assets_dir;
+  config.static_dir = static_dir;
   config.aggregate_templates = aggregates;
   config.aggregate_template_count = 2;
   struct Album root = {.source_dir = "",
@@ -72,8 +72,8 @@ static void test_writes_complete_output_layer(void) {
   const struct Album* albums[] = {&root};
   char html[] = "<h1>Root</h1>";
   const struct RenderedPage rendered[] = {{.html = html, .html_len = sizeof(html) - 1}};
-  struct PathList assets;
-  path_list_init(&assets);
+  struct PathList static_paths;
+  path_list_init(&static_paths);
   char err[ERROR_MESSAGE_SIZE];
   if (!TEST_CHECK(write_fixture_file(root_dir, "templates/map.xml", "<g>{{gallery.title}}</g>") ==
                   0)) {
@@ -83,28 +83,28 @@ static void test_writes_complete_output_layer(void) {
                   0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "assets/icons/a.txt", "asset") == 0)) {
+  if (!TEST_CHECK(write_fixture_file(root_dir, "static/icons/a.txt", "static") == 0)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(output_dir != NULL && templates_dir != NULL && assets_dir != NULL &&
-                  root_output != NULL && asset_source != NULL && aggregate_output != NULL &&
-                  nested_output != NULL && asset_output != NULL)) {
+  if (!TEST_CHECK(output_dir != NULL && templates_dir != NULL && static_dir != NULL &&
+                  root_output != NULL && static_source != NULL && aggregate_output != NULL &&
+                  nested_output != NULL && static_output != NULL)) {
     goto cleanup;
   }
-  if (!TEST_CHECK(path_list_push(&assets, asset_source) == 0)) {
+  if (!TEST_CHECK(path_list_push(&static_paths, static_source) == 0)) {
     goto cleanup;
   }
 
   TEST_CHECK(site_writer_write_album_pages(albums, 1, rendered, err, sizeof(err)) == 0);
   TEST_CHECK(site_writer_write_aggregates(&config, albums[0], err, sizeof(err)) == 0);
-  TEST_CHECK(site_writer_copy_assets(&config, &assets, err, sizeof(err)) == 0);
+  TEST_CHECK(site_writer_copy_static_files(&config, &static_paths, err, sizeof(err)) == 0);
   check_file_text(root_output, "<h1>Root</h1>");
   check_file_text(aggregate_output, "<g>Gallery &amp; Co</g>");
   check_file_text(nested_output, "../index.html");
-  check_file_text(asset_output, "asset");
+  check_file_text(static_output, "static");
 
 cleanup:
-  path_list_free(&assets);
+  path_list_free(&static_paths);
   gallery_config_free(&config);
   arena_free(&paths);
   remove_fixture_tree(root_dir);
