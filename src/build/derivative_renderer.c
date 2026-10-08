@@ -32,7 +32,7 @@ enum { DECODE_PIXEL_BUDGET = 2 * IMAGE_PIXEL_COUNT_MAX };
 
 // A job reserves its whole pixel count before decoding, so one image larger than the budget would
 // wait forever.
-_Static_assert(DECODE_PIXEL_BUDGET >= IMAGE_PIXEL_COUNT_MAX,
+_Static_assert((int)DECODE_PIXEL_BUDGET >= (int)IMAGE_PIXEL_COUNT_MAX,
                "a maximum-size image must fit the decode budget alone");
 
 /** Pixel reservations shared by every derivative worker in the process. */

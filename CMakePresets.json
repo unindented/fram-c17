@@ -9,7 +9,7 @@
     {
       "name": "base",
       "hidden": true,
-      "binaryDir": "${sourceDir}/build/${presetName}",
+      "binaryDir": "${sourceDir}/build/${presetName}/$env{CC}",
       "cacheVariables": {
         "CMAKE_COMPILE_WARNING_AS_ERROR": "ON"
       }
