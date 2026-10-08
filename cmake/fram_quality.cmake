@@ -118,6 +118,13 @@ if(CMAKE_CROSSCOMPILING)
   set(fram_cppcheck_command "")
 endif()
 
+# clang-tidy reads the compiler's command line, and it rejects GCC-only warning options such as
+# `-Wlogical-op` as errors. cppcheck does not read the flags, so it runs with any compiler.
+if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
+  message(VERBOSE "compiler is ${CMAKE_C_COMPILER_ID}, not Clang; clang-tidy is disabled")
+  set(fram_clang_tidy_command "")
+endif()
+
 # Production and test targets run cppcheck with the same arguments.
 set(fram_cppcheck_property
     "${fram_cppcheck_command};--enable=warning,performance,portability;--std=${fram_cppcheck_standard};--error-exitcode=1;--quiet"

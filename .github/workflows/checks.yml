@@ -67,3 +67,36 @@ jobs:
 
       - name: Build and test two configurations with a second generator
         run: cmake --workflow --preset ci-multi
+
+  gcc:
+    name: CI (ubuntu-latest, GCC)
+    runs-on: ubuntu-latest
+    env:
+      CC: gcc-14
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg gcc-14 ninja-build
+
+      - name: Record build tool versions
+        run: |
+          cmake --version
+          ninja --version
+          "$CC" --version
+
+      - name: Resolve build and test parallelism
+        run: |
+          echo "CMAKE_BUILD_PARALLEL_LEVEL=$(getconf _NPROCESSORS_ONLN)" >> "$GITHUB_ENV"
+          echo "CTEST_PARALLEL_LEVEL=$(getconf _NPROCESSORS_ONLN)" >> "$GITHUB_ENV"
+
+      # The sanitizer passes run in the Clang job, which also runs clang-tidy and cppcheck. This job
+      # checks that GCC builds the project with its own warnings as errors and that the tests pass in
+      # both configurations. clang-tidy disables itself for a compiler other than Clang.
+      - name: Build and test two configurations with GCC
+        run: cmake --workflow --preset ci-multi

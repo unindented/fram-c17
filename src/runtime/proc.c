@@ -344,7 +344,7 @@ static int drain_stream(struct ProcStream* stream,
     if (errno == EINTR) {
       continue;
     }
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+    if (errno == EAGAIN) {
       return 0;
     }
     char message[PROC_MESSAGE_SIZE];
