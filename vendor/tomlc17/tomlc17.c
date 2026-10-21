@@ -6,13 +6,25 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <locale.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// static_assert is C11; provide a fallback for C99 (issue #58).
+#if !defined(__cplusplus) &&                                                   \
+    (!defined(__STDC_VERSION__) || (__STDC_VERSION__ < 201112L))
+#undef static_assert
+#define TOML_CAT_(a, b) a##b
+#define TOML_CAT(a, b) TOML_CAT_(a, b)
+#define static_assert(cond, msg)                                               \
+  enum { TOML_CAT(toml_static_assert_, __LINE__) = 1 / (int)(!!(cond)) }
+#endif
 
 const toml_datum_t DATUM_ZERO = {0};
 
@@ -107,7 +119,7 @@ static page_t *page_create(int size) {
   if (!(0 <= size && size <= (1 << 30))) { // [0..1GB]
     return NULL;
   }
-  size_t totalsz = (size_t) & ((page_t *)0)->data[size];
+  size_t totalsz = offsetof(page_t, data) + (size_t)size;
   page_t *page = MALLOC(totalsz);
   if (!page) {
     return NULL;
@@ -271,6 +283,15 @@ static int ucs_to_utf8(uint32_t code, char buf[4]);
 #define BRACE_LEVEL_MAX 30
 #define TABLE_MAX (1 << 14) // 16k
 #define ARRAY_MAX (1 << 14) // 16k
+
+// Buffer size for scanning a number or a timestamp. TOML does not limit the
+// length of either literal; tomlc17 does, like the limits above: a literal that
+// fills the buffer is rejected as too long, so LITBUF_SIZE - 2 bytes is the
+// longest one accepted. That accommodates "9_007_199_254_740_991.0",
+// picosecond-precision timestamps, and every other spelling of ordinary length.
+// The checks test the length of the literal itself, not of the copy, because
+// scan_copystr() also copies whatever follows the literal.
+#define LITBUF_SIZE 120
 
 enum toktyp_t {
   TOK_DOT = 1,
@@ -665,9 +686,13 @@ bail:
   return -1;
 }
 
-// Check if datum is an array of tables.
+// Check if datum is an array of tables. An empty array is deliberately
+// excluded: it has no elements to type-check, so treating it as an array
+// of tables here would be true only vacuously, and datum_merge's caller
+// relies on this to distinguish "override with an empty array" from
+// "append zero table elements" (see below).
 static inline bool is_array_of_tables(toml_datum_t datum) {
-  bool ret = (datum.type == TOML_ARRAY);
+  bool ret = (datum.type == TOML_ARRAY) && (datum.u.arr.size > 0);
   for (int i = 0; ret && i < datum.u.arr.size; i++) {
     ret = (datum.u.arr.elem[i].type == TOML_TABLE);
   }
@@ -991,13 +1016,16 @@ toml_result_t toml_parse_file_named(FILE *fp, const char *name) {
   char *buf = 0;
   int top = 0;                 // number of bytes read into buf[]
   enum { CHUNKSZ = 8 * 1024 }; // bytes to read per iteration
+  // File size limit. This also keeps cell_realloc's 30% growth margin
+  // well within INT_MAX.
+  enum { MAXFILESZ = 1 << 30 }; // 1GB
 
   // Read file into memory. cell_realloc handles capacity growth, so we only
   // need to ask for room for one more chunk each pass. Drive the loop off
   // fread's return value rather than feof(): feof() only reports true after
   // a read has already hit EOF.
   for (;;) {
-    if (top > INT_MAX - CHUNKSZ) {
+    if (top >= MAXFILESZ) {
       snprintf(result.errmsg, sizeof(result.errmsg), "file is too big");
       break;
     }
@@ -1321,6 +1349,11 @@ static toml_datum_t *descend_keypart(parser_t *pp, int lineno, int colno,
 
   for (int i = 0; i < keypart->nspan; i++) {
     const char *reason;
+    // Cannot descend into an inline table.
+    if (tab->flag & TOML_FLAG_INLINED) {
+      SETERROR(pp->ebuf, lineno, "inline table cannot be extended");
+      return NULL;
+    }
     // Find the i-th keypart
     int j = tab_find(tab, keypart->span[i]);
     // Not found: add a new (key, tab) pair.
@@ -1774,6 +1807,16 @@ static int parse_keyvalue_expr(parser_t *pp, token_t tok) {
     }
     toml_datum_t *value = &tab->u.tab.value[j];
     if (value->type == TOML_TABLE) {
+      if (value->flag & TOML_FLAG_INLINED) {
+        return SETERROR(pp->ebuf, keylineno, "inline table cannot be extended");
+      }
+      if (value->flag & TOML_FLAG_EXPLICIT) {
+        return SETERROR(pp->ebuf, keylineno,
+                        "cannot extend a previously defined table using "
+                        "dotted expression");
+      }
+      // Now defined by dotted keys: a later [table] header must fail.
+      value->flag &= ~TOML_FLAG_STDEXPR;
       tab = value;
       continue;
     }
@@ -2311,6 +2354,7 @@ static bool is_valid_time(int hour, int minute, int sec, int usec) {
   if (!(0 <= minute && minute <= 59)) {
     return false;
   }
+  // RFC 3339 permits sec == 60 for leap seconds; reject it deliberately.
   if (!(0 <= sec && sec <= 59)) {
     return false;
   }
@@ -2456,7 +2500,7 @@ static int read_tzone(const char *p, char *tzsign, int *tzhour, int *tzminute) {
 // Scan hh:mm:ss.xxxxx
 static int scan_time(scanner_t *sp, token_t *tok) {
   int lineno = sp->lineno;
-  char buffer[20];
+  char buffer[LITBUF_SIZE];
   scan_copystr(sp, buffer, sizeof(buffer));
 
   char *p = buffer;
@@ -2464,6 +2508,9 @@ static int scan_time(scanner_t *sp, token_t *tok) {
   int len = read_time(p, &hour, &minute, &sec, &usec);
   if (len == 0) {
     return SETERROR(sp->ebuf, lineno, "invalid time");
+  }
+  if (len + 1 >= (int)sizeof(buffer)) {
+    return SETERROR(sp->ebuf, lineno, "timestamp too long");
   }
   if (!is_valid_time(hour, minute, sec, usec)) {
     return SETERROR(sp->ebuf, lineno, "invalid time");
@@ -2490,7 +2537,7 @@ static int scan_timestamp(scanner_t *sp, token_t *tok) {
 
   int n;
   // make a copy of sp->cur into buffer to ensure NUL terminated string
-  char buffer[80];
+  char buffer[LITBUF_SIZE];
   scan_copystr(sp, buffer, sizeof(buffer));
 
   toktyp_t toktyp = TOK_FIN;
@@ -2553,6 +2600,9 @@ static int scan_timestamp(scanner_t *sp, token_t *tok) {
 done:
   *tok = mktoken(sp, toktyp);
   n = p - buffer;
+  if (n + 1 >= (int)sizeof(buffer)) {
+    return SETERROR(sp->ebuf, lineno, "timestamp too long");
+  }
   tok->str.len = n;
   sp->cur += n;
 
@@ -2650,7 +2700,7 @@ static int process_numstr(char *buffer, int base, const char **reason) {
 }
 
 static int scan_float(scanner_t *sp, token_t *tok) {
-  char buffer[50]; // need to accommodate "9_007_199_254_740_991.0"
+  char buffer[LITBUF_SIZE];
   scan_copystr(sp, buffer, sizeof(buffer));
 
   int lineno = sp->lineno;
@@ -2662,6 +2712,9 @@ static int scan_float(scanner_t *sp, token_t *tok) {
     p += strspn(p, "_0123456789eE.+-");
   }
   int len = p - buffer;
+  if (len + 1 >= (int)sizeof(buffer)) {
+    return SETERROR(sp->ebuf, lineno, "number too long");
+  }
   buffer[len] = 0;
 
   const char *reason;
@@ -2669,12 +2722,38 @@ static int scan_float(scanner_t *sp, token_t *tok) {
     return SETERROR(sp->ebuf, lineno, "%s", reason);
   }
 
+  // strtod() honors LC_NUMERIC, but TOML always uses '.'; substitute the
+  // locale's decimal point, which may be multi-byte (issue #57).
+  // No-op in the "C" locale. Literals without '.' (1e3, inf, nan) skip this.
+  char *dot = strchr(buffer, '.');
+  const char *dp = localeconv()->decimal_point; // never empty per C std
+  if (dot && 0 != strcmp(dp, ".")) {
+    size_t dplen = strlen(dp);
+    // Result is strlen(buffer) - 1 + dplen bytes plus NUL; ensure it fits.
+    if (strlen(buffer) + dplen > sizeof(buffer)) {
+      return SETERROR(sp->ebuf, lineno, "number too long");
+    }
+    // Shift the tail (including NUL) to make room, then write dp over '.'.
+    // Regions overlap, hence memmove.
+    memmove(dot + dplen, dot + 1, strlen(dot + 1) + 1);
+    memcpy(dot, dp, dplen);
+  }
+
   errno = 0;
   char *q;
   double fp64 = strtod(buffer, &q);
   // glibc sets ERANGE on underflow even when strtod's result is correctly
-  // rounded, e.g. 5e-324; allow acceptance of such subnormal results.
-  int is_ok_subnormal = (errno == ERANGE) && fp64 != 0.0 && isfinite(fp64);
+  // rounded, e.g. 5e-324; accept such results, but still reject a value that
+  // underflowed to zero or overflowed to infinity. Test the raw bits rather
+  // than "fp64 != 0.0" and isfinite(): if the calling program enables
+  // denormals-are-zero (e.g. an app linked with -ffast-math, or built with
+  // Intel icx), an FP compare reads a subnormal as 0.0 (issue #49).
+  static_assert(sizeof(fp64) == sizeof(uint64_t), "double must be 64 bits");
+  uint64_t fp64_bits;
+  memcpy(&fp64_bits, &fp64, sizeof(fp64));
+  uint64_t fp64_mag = fp64_bits & 0x7fffffffffffffffULL; // drop the sign bit
+  int is_ok_subnormal =
+      (errno == ERANGE) && fp64_mag != 0 && fp64_mag < 0x7ff0000000000000ULL;
   if ((errno && !is_ok_subnormal) || *q || q == buffer) {
     return SETERROR(sp->ebuf, lineno, "error parsing float");
   }
@@ -2688,7 +2767,7 @@ static int scan_float(scanner_t *sp, token_t *tok) {
 
 static int scan_number(scanner_t *sp, token_t *tok) {
   const char *reason;
-  char buffer[50]; // need to accommodate "9_007_199_254_740_991.0"
+  char buffer[LITBUF_SIZE];
   scan_copystr(sp, buffer, sizeof(buffer));
 
   char *p = buffer;
@@ -2715,6 +2794,9 @@ static int scan_number(scanner_t *sp, token_t *tok) {
       p += 2;
       p += strspn(p, span);
       int len = p - buffer;
+      if (len + 1 >= (int)sizeof(buffer)) {
+        return SETERROR(sp->ebuf, lineno, "number too long");
+      }
       buffer[len] = 0;
 
       if (process_numstr(buffer + 2, base, &reason)) {
@@ -2747,6 +2829,9 @@ static int scan_number(scanner_t *sp, token_t *tok) {
   p = buffer;
   p += strspn(p, "0123456789_+-.eE");
   int len = p - buffer;
+  if (len + 1 >= (int)sizeof(buffer)) {
+    return SETERROR(sp->ebuf, lineno, "number too long");
+  }
   buffer[len] = 0;
 
   if (process_numstr(buffer, 10, &reason)) {

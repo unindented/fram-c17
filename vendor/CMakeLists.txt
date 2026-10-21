@@ -44,15 +44,13 @@ foreach(target IN ITEMS fram_vendor_mustache fram_vendor_stb fram_vendor_tomlc17
   target_link_libraries(${target} PRIVATE fram_build_vendor)
 endforeach()
 
-# stb_image_write's JPEG bit buffer deliberately shifts through the sign bit. stb_image_resize2's
-# SIMD sRGB lookup deliberately biases a table pointer before its array and adds the exponent back
-# before dereferencing it. UBSan diagnoses both implementation techniques even though the final
-# accesses are valid. Keep the exceptions on this pinned vendor translation unit only. All
-# first-party callers remain fully instrumented.
+# stb_image_write's JPEG bit buffer deliberately shifts through the sign bit. UBSan diagnoses the
+# shift even though the result is valid. Keep the exception on this pinned vendor translation unit
+# only. All first-party callers remain fully instrumented.
 if(FRAM_SANITIZER STREQUAL "address")
   set_property(
     SOURCE stb/stb.c
     APPEND
-    PROPERTY COMPILE_OPTIONS $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-fno-sanitize=shift,bounds>
+    PROPERTY COMPILE_OPTIONS $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-fno-sanitize=shift>
   )
 endif()

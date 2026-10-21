@@ -185,7 +185,8 @@ Vendored dependencies are included under `vendor/`:
 - [`sharedstuff`](https://github.com/unindented/sharedstuff-c17): Arena allocation, counted strings, output buffers, and the diagnostic log.
 - [`copt`](https://github.com/fardaniqbal/copt): Command line option parsing.
 - [`tomlc17`](https://github.com/cktan/tomlc17): TOML configuration parsing.
-- [`stb`](https://github.com/nothings/stb): JPEG decoding, resizing, and encoding.
+- [`stb`](https://github.com/nothings/stb): JPEG decoding and encoding.
+- [`stb_image_resize`](https://github.com/nothings/stb_image_resize): Image resizing.
 - [`mustache4c`](https://github.com/mity/mustache4c): Mustache template rendering.
 - [`acutest`](https://github.com/mity/acutest): Tests.
 

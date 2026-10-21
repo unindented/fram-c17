@@ -75,7 +75,7 @@ Generator expressions select configuration options at build time. The same rules
 
 `FRAM_SANITIZER` accepts `none`, `address`, or `thread`. The `address` option enables AddressSanitizer and UndefinedBehaviorSanitizer. The `thread` option enables ThreadSanitizer. It adds sanitizer options to standard CMake configurations. It does not create custom build types.
 
-The address-sanitizer profile instruments first-party and vendored code. Vendored code disables the unsupported `null` and `object-size` checks. The pinned stb translation unit also disables the `shift` check for JPEG bit packing and the `bounds` check for its deliberately biased SIMD lookup pointer. First-party sources retain the full sanitizer set.
+The address-sanitizer profile instruments first-party and vendored code. Vendored code disables the unsupported `null` and `object-size` checks. The pinned stb translation unit also disables the `shift` check for JPEG bit packing. First-party sources retain the full sanitizer set.
 
 ## Linting and formatting
 

@@ -150,6 +150,8 @@ TOML_EXTERN toml_result_t toml_parse_named(const char *src, int len,
  * it.
  * @return A toml_result_t structure. Must be freed with toml_free().
  *
+ * Files of 1GB or larger are rejected with a "file is too big" error.
+ *
  * IMPORTANT: you are still responsible to fclose(fp).
  */
 TOML_EXTERN toml_result_t toml_parse_file(FILE *fp);
@@ -162,6 +164,8 @@ TOML_EXTERN toml_result_t toml_parse_file(FILE *fp);
  * @param name A source name copied into the result, or NULL.
  * @return A toml_result_t structure. Must be freed with toml_free().
  *
+ * Files of 1GB or larger are rejected with a "file is too big" error.
+ *
  * IMPORTANT: you are still responsible to fclose(fp).
  */
 TOML_EXTERN toml_result_t toml_parse_file_named(FILE *fp, const char *name);
@@ -171,6 +175,8 @@ TOML_EXTERN toml_result_t toml_parse_file_named(FILE *fp, const char *name);
  *
  * @param fname The path to the TOML file.
  * @return A toml_result_t structure. Must be freed with toml_free().
+ *
+ * Files of 1GB or larger are rejected with a "file is too big" error.
  */
 TOML_EXTERN toml_result_t toml_parse_file_ex(const char *fname);
 
@@ -257,9 +263,9 @@ typedef struct toml_option_t toml_option_t;
 struct toml_option_t {
   bool check_utf8; /**< If true, check if all characters are valid UTF-8.
                       Default: false. */
-  void *(*mem_realloc)(
-      void *ptr,
-      size_t size); /**< Custom realloc function. Default: realloc(). */
+  void *(*mem_realloc)(void *ptr,
+                       size_t size); /**< Custom realloc function (called with
+                                        size > 0). Default: realloc(). */
   void (*mem_free)(void *ptr); /**< Custom free function. Default: free(). */
 };
 
