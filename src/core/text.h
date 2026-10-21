@@ -2,70 +2,48 @@
 #define FRAM_TEXT_H
 
 #include <stdbool.h>
-#include <stddef.h>
+
+#include "shared/str.h"
 
 struct Arena;
 
 /**
- * @brief Duplicates a terminated string into a fresh heap buffer owned by the caller.
+ * @brief Reports whether a string contains no `NUL` byte.
  *
- * This is the heap-backed counterpart to `arena_strdup`, for storage whose lifetime is not tied to
- * an arena.
+ * A `NUL` byte is ordinary to every first-party string. Text inputs reject it anyway, at every text
+ * consumer of `os_read` for file contents, at `toml_datum_is_text` for a decoded TOML string and at
+ * `toml_require_known_keys` for a decoded TOML key, because it has no meaning in any text format
+ * `fram` reads or writes and an HTML parser replaces or drops it. `os_read` itself accepts any
+ * bytes, because it also reads media.
  *
- * @param text Terminated source string. Must not be `NULL`.
- * @return Terminated copy the caller must `free`, or `NULL` on allocation failure.
- */
-char* text_strdup(const char* text) __attribute__((nonnull(1)));
-
-/**
- * @brief Reports whether a byte buffer contains no embedded `NUL` byte.
- *
- * Text boundaries call this to establish the codebase's `NUL`-free text invariant: every text
- * consumer of `fs_read_file`, for file contents, and `toml_datum_is_text`, for a decoded TOML
- * string. `fs_read_file` itself accepts arbitrary bytes, because it also reads media. A zero-length
- * buffer is text regardless of the pointer value.
- *
- * @param data     Bytes to inspect. May be `NULL` only when `data_len` is 0.
- * @param data_len Number of bytes to inspect.
+ * @param text Bytes to inspect.
  * @return `true` when none of the bytes is zero, or `false` otherwise.
  */
-bool text_is_nul_free(const unsigned char* data, size_t data_len);
+bool text_is_nul_free(struct Str text);
 
 /**
  * @brief Reports whether `name` contains only safe template identifier bytes.
  *
  * A safe identifier is non-empty and made up only of ASCII alphanumerics, `_`, and `-`.
  *
- * @param name Candidate identifier. `NULL` is treated as unsafe.
+ * @param name Candidate identifier.
  * @return `true` when `name` is a safe identifier, `false` otherwise.
  */
-bool text_is_safe_identifier(const char* name);
+bool text_is_safe_identifier(struct Str name);
 
 /**
- * @brief Converts arbitrary text to a lowercase, URL-safe slug in arena-owned storage.
+ * @brief Converts arbitrary text to a lowercase, URL-safe slug in arena-owned storage unless it is
+ *        the fallback.
  *
  * Runs of ASCII non-alphanumeric bytes collapse to single dashes. A leading dash is never emitted,
  * and a trailing one is trimmed. It folds a non-ASCII byte to two lowercase hex digits, so names
  * that differ only outside ASCII still yield distinct slugs. Text that yields no usable characters
  * falls back to the literal `untitled`.
  *
- * Takes a length so a caller can slugify a borrowed slice of a larger buffer, such as one path
- * segment, without copying it out first. The returned slug is a terminated owned string either way.
- *
- * Reports the slug's length rather than leaving the caller to recover it with `strlen`. This
- * function already knows it exactly, so handing it back lets a caller that checks it against a
- * limit or sizes a joined buffer from it read that length instead of a second derivation that has
- * to agree with it.
- *
- * @param text         Source bytes to slugify. Must hold at least `text_len` bytes. Must not be
- *                     `NULL`.
- * @param text_len     Number of bytes to slugify.
- * @param arena        Arena that owns the returned slug. Must not be `NULL`.
- * @param slug_len_out Receives the slug's length in bytes, excluding the terminator. Written only
- *                     on success. Must not be `NULL`.
- * @return Terminated slug owned by the arena, or `NULL` on an oversize input or allocation failure.
+ * @param text  Source bytes to slugify.
+ * @param arena Arena that owns the returned slug. Must not be `NULL`.
+ * @return Slug owned by the arena, or the static fallback.
  */
-char* text_slugify(const char* text, size_t text_len, struct Arena* arena, size_t* slug_len_out)
-    __attribute__((nonnull(1, 3, 4)));
+struct Str text_slugify(struct Str text, struct Arena* arena) __attribute__((nonnull(2)));
 
 #endif

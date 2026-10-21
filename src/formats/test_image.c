@@ -1,20 +1,54 @@
 #include <acutest.h>
 #include <stdbool.h>
-#include <stdlib.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <string.h>
+#include <sys/resource.h>
+#include <unistd.h>
 
 #include "formats/image.h"
+#include "shared/buf.h"
+#include "shared/log.h"
+#include "shared/str.h"
+#include "test_support.h"
+
+// A sanitizer's allocator ends the process itself when an allocation fails, so the decode that runs
+// out of memory cannot reach the stb hooks under one. GCC defines `__SANITIZE_*__`, and Apple Clang
+// answers `__has_feature` instead. cppcheck fails on `__has_feature` where it does not exist, so
+// the test is hidden from it.
+#if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
+#define TEST_IS_SANITIZED 1
+#elif defined(__has_feature) && !defined(__CPPCHECK__)
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer)
+#define TEST_IS_SANITIZED 1
+#endif
+#endif
+
+// Linux enforces `RLIMIT_AS`, and macOS does not, so only Linux can make the decode run out.
+#if defined(__linux__) && !defined(TEST_IS_SANITIZED)
+#define TEST_HAS_ADDRESS_LIMIT 1
+#endif
+
+#ifdef TEST_HAS_ADDRESS_LIMIT
+/** JPEG bytes a child process decodes. */
+struct DecodeInput {
+  /** Encoded JPEG. */
+  struct Str data;
+};
+#endif
 
 /**
- * @brief Encodes one image for decoder and probe tests.
+ * @brief Encodes one image for decoder and probe tests, recording why when it cannot.
  *
- * @param image        Image to encode. Must not be `NULL`.
- * @param data_out     Receives malloc-owned JPEG bytes. Must not be `NULL`.
- * @param data_len_out Receives the JPEG byte length. Must not be `NULL`.
+ * @param image    Image to encode. Must not be `NULL`.
+ * @param arena    Arena that receives the JPEG bytes. Must not be `NULL`.
+ * @param jpeg_out Receives the JPEG, which lives as long as `arena`. Written only on success. Must
+ *                 not be `NULL`.
+ * @return `0` on success, or `-1` after recording a test failure.
  */
-static void encode_fixture(const struct Image* image,
-                           unsigned char** data_out,
-                           size_t* data_len_out) __attribute__((nonnull(1, 2, 3)));
+static int encode_fixture(const struct Image* image, struct Arena* arena, struct Str* jpeg_out)
+    __attribute__((nonnull(1, 2, 3)));
 
 /**
  * @brief Checks one exact orientation of the asymmetric fixture.
@@ -26,45 +60,106 @@ static void encode_fixture(const struct Image* image,
  */
 static void check_orientation(enum ImageOrientation orientation,
                               const unsigned char* expected_values,
-                              size_t width_expected,
-                              size_t height_expected) __attribute__((nonnull(2)));
+                              ptrdiff_t width_expected,
+                              ptrdiff_t height_expected) __attribute__((nonnull(2)));
 
-static void encode_fixture(const struct Image* image,
-                           unsigned char** data_out,
-                           size_t* data_len_out) {
-  char reason[IMAGE_REASON_SIZE];
-  TEST_ASSERT(image_encode_jpeg(image, 100, data_out, data_len_out, reason, sizeof(reason)) == 0);
+/**
+ * @brief Asks `image_alloc` for more bytes than any object can have.
+ *
+ * @param userdata Unused.
+ */
+static void alloc_beyond_object_len(void* userdata);
+
+/**
+ * @brief Asks `image_realloc` for more bytes than any object can have.
+ *
+ * @param userdata Unused.
+ */
+static void realloc_beyond_object_len(void* userdata);
+
+#ifdef TEST_HAS_ADDRESS_LIMIT
+/**
+ * @brief Decodes a JPEG under an address-space limit that leaves no room for its pixels.
+ *
+ * The limit leaves 8 MiB above what the process maps already, so the decoder's first full-size
+ * buffer cannot be allocated.
+ *
+ * @param userdata `const struct DecodeInput*` naming the JPEG. Must not be `NULL`.
+ */
+static void decode_under_address_limit(void* userdata) __attribute__((nonnull(1)));
+#endif
+
+static int encode_fixture(const struct Image* image, struct Arena* arena, struct Str* jpeg_out) {
+  struct Log log = test_log();
+  const int rc = image_encode_jpeg(image, 100, arena, jpeg_out, S("failed to encode fixture"),
+                                   S("fixture.jpg"), &log);
+  if (!TEST_CHECK(rc == 0)) {
+    const struct Str failure = buf_str(&log.buf);
+    TEST_MSG("%.*s", STR_FMT(failure));
+    return -1;
+  }
+  return 0;
 }
 
 static void check_orientation(enum ImageOrientation orientation,
                               const unsigned char* expected_values,
-                              size_t width_expected,
-                              size_t height_expected) {
+                              ptrdiff_t width_expected,
+                              ptrdiff_t height_expected) {
   static const unsigned char source_pixels[] = {
       1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5, 6, 6, 6,
   };
-  struct Image oriented = {.pixels = malloc(sizeof(source_pixels)), .width_px = 2, .height_px = 3};
-  TEST_ASSERT(oriented.pixels != NULL);
-  if (oriented.pixels == NULL) {
-    return;
-  }
+  struct Image oriented = {
+      .pixels = image_alloc(sizeof(source_pixels)), .width_px = 2, .height_px = 3};
   memcpy(oriented.pixels, source_pixels, sizeof(source_pixels));
-  char reason[IMAGE_REASON_SIZE];
-  TEST_ASSERT(image_orient(&oriented, orientation, reason, sizeof(reason)) == 0);
+  image_orient(&oriented, orientation);
   TEST_CHECK(oriented.width_px == width_expected);
   TEST_CHECK(oriented.height_px == height_expected);
-  for (size_t i = 0; i < width_expected * height_expected; i++) {
-    for (size_t channel = 0; channel < IMAGE_CHANNEL_COUNT; channel++) {
+  for (ptrdiff_t i = 0; i < width_expected * height_expected; i++) {
+    for (ptrdiff_t channel = 0; channel < IMAGE_CHANNEL_COUNT; channel++) {
       TEST_CHECK(oriented.pixels[i * IMAGE_CHANNEL_COUNT + channel] == expected_values[i]);
     }
   }
   image_free(&oriented);
 }
 
+static void alloc_beyond_object_len(void* userdata) {
+  (void)userdata;
+  (void)image_alloc((size_t)PTRDIFF_MAX + 1);
+}
+
+static void realloc_beyond_object_len(void* userdata) {
+  (void)userdata;
+  (void)image_realloc(NULL, SIZE_MAX);
+}
+
+#ifdef TEST_HAS_ADDRESS_LIMIT
+static void decode_under_address_limit(void* userdata) {
+  const struct DecodeInput* input = userdata;
+  FILE* statm = fopen("/proc/self/statm", "r");
+  unsigned long mapped_pages = 0;
+  if (statm == NULL || fscanf(statm, "%lu", &mapped_pages) != 1) {
+    return;
+  }
+  (void)fclose(statm);
+  // The log is reserved before the limit, so only the decode can run out.
+  struct Log log = test_log();
+  const rlim_t headroom_len = 8 * 1024 * 1024;
+  const struct rlimit limit = {
+      .rlim_cur = (rlim_t)mapped_pages * (rlim_t)sysconf(_SC_PAGESIZE) + headroom_len,
+      .rlim_max = RLIM_INFINITY,
+  };
+  if (setrlimit(RLIMIT_AS, &limit) != 0) {
+    return;
+  }
+  struct Image image = {0};
+  (void)image_decode(input->data, &image, S("failed to decode"), S("a.jpg"), &log);
+}
+#endif
+
 // A source already inside the box keeps its exact dimensions; fitting never enlarges.
 static void test_image_fit_does_not_enlarge(void) {
-  size_t width = 0;
-  size_t height = 0;
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
   image_fit(100, 50, 200, 200, &width, &height);
   TEST_CHECK(width == 100);
   TEST_CHECK(height == 50);
@@ -72,8 +167,8 @@ static void test_image_fit_does_not_enlarge(void) {
 
 // Wide and tall inputs select the limiting side while retaining aspect ratio.
 static void test_image_fit_preserves_aspect_ratio(void) {
-  size_t width = 0;
-  size_t height = 0;
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
   image_fit(400, 200, 100, 100, &width, &height);
   TEST_CHECK(width == 100);
   TEST_CHECK(height == 50);
@@ -89,8 +184,8 @@ static void test_image_fit_preserves_aspect_ratio(void) {
 
 // An extreme aspect ratio clamps its fitted minor dimension to one pixel, never zero.
 static void test_image_fit_clamps_to_one_pixel(void) {
-  size_t width = 0;
-  size_t height = 0;
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
   image_fit(IMAGE_DIMENSION_MAX, 1, 1, 1, &width, &height);
   TEST_CHECK(width == 1);
   TEST_CHECK(height == 1);
@@ -102,34 +197,56 @@ static void test_image_encode_probe_and_decode(void) {
       20, 100, 220, 20, 100, 220, 20, 100, 220, 20, 100, 220, 20, 100, 220, 20, 100, 220,
   };
   const struct Image source = {.pixels = pixels, .width_px = 3, .height_px = 2};
-  unsigned char* encoded = NULL;
-  size_t encoded_len = 0;
-  encode_fixture(&source, &encoded, &encoded_len);
-  if (encoded == NULL) {
+  struct Arena arena = test_arena();
+  struct Str encoded = {0};
+  if (encode_fixture(&source, &arena, &encoded) != 0) {
     return;
   }
-  TEST_CHECK(encoded_len > 4);
-  TEST_CHECK(encoded[0] == 0xFF && encoded[1] == 0xD8);
-  TEST_CHECK(encoded[encoded_len - 2] == 0xFF && encoded[encoded_len - 1] == 0xD9);
+  TEST_CHECK(encoded.len > 4);
+  TEST_CHECK(str_startswith(encoded, S("\xFF\xD8")));
+  TEST_CHECK(str_endswith(encoded, S("\xFF\xD9")));
 
-  size_t width = 0;
-  size_t height = 0;
-  char reason[IMAGE_REASON_SIZE];
-  TEST_CHECK(image_probe(encoded, encoded_len, &width, &height, reason, sizeof(reason)) == 0);
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
+  struct Log log = test_log();
+  TEST_CHECK(image_probe(encoded, &width, &height, S("failed to probe"), S("a.jpg"), &log) == 0);
   TEST_CHECK(width == 3);
   TEST_CHECK(height == 2);
 
   struct Image decoded = {0};
-  TEST_ASSERT(image_decode(encoded, encoded_len, 3, 2, &decoded, reason, sizeof(reason)) == 0);
+  TEST_ASSERT(image_decode(encoded, &decoded, S("failed to decode"), S("a.jpg"), &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
   TEST_CHECK(decoded.width_px == 3);
   TEST_CHECK(decoded.height_px == 2);
-  for (size_t i = 0; i < 6; i++) {
+  for (ptrdiff_t i = 0; i < 6; i++) {
     TEST_CHECK(abs((int)decoded.pixels[i * 3] - 20) <= 3);
     TEST_CHECK(abs((int)decoded.pixels[i * 3 + 1] - 100) <= 3);
     TEST_CHECK(abs((int)decoded.pixels[i * 3 + 2] - 220) <= 3);
   }
   image_free(&decoded);
-  free(encoded);
+}
+
+// An encode returns the same JPEG bytes in every run, and they start where `perm` was free, which
+// is advanced past them.
+static void test_image_encode_is_deterministic_in_perm(void) {
+  enum { WIDTH = 32, HEIGHT = 24 };
+  unsigned char pixels[WIDTH * HEIGHT * IMAGE_CHANNEL_COUNT];
+  for (ptrdiff_t i = 0; i < (ptrdiff_t)sizeof(pixels); i++) {
+    pixels[i] = (unsigned char)(i * 37 % 251);
+  }
+  const struct Image source = {.pixels = pixels, .width_px = WIDTH, .height_px = HEIGHT};
+  struct Log log = test_log();
+  struct Arena arena = test_arena();
+  const char* const perm_beg = arena.beg;
+  struct Str first = {0};
+  struct Str second = {0};
+  TEST_CHECK(image_encode_jpeg(&source, 90, &arena, &first, S("op"), S("a.jpg"), &log) == 0);
+  TEST_CHECK(first.data >= perm_beg && arena.beg >= first.data + first.len);
+  TEST_CHECK(image_encode_jpeg(&source, 90, &arena, &second, S("op"), S("a.jpg"), &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(first.len > 2 && (unsigned char)first.data[0] == 0xFF &&
+             (unsigned char)first.data[1] == 0xD8);
+  TEST_CHECK(str_eq(first, second));
 }
 
 // Probing rejects hostile dimensions before the decoder can allocate their full pixel buffer.
@@ -138,47 +255,101 @@ static void test_image_probe_rejects_oversized_dimensions(void) {
       0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x01, 0x4E, 0x21, 0x03,
       0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xFF, 0xD9,
   };
-  size_t width = 0;
-  size_t height = 0;
-  char reason[IMAGE_REASON_SIZE];
-  TEST_CHECK(image_probe(jpeg, sizeof(jpeg), &width, &height, reason, sizeof(reason)) == -1);
-  TEST_CHECK(strcmp(reason, "image exceeds max dimension (20000 pixels): 20001 x 1") == 0);
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
+  struct Log probe_log = test_log();
+  TEST_CHECK(image_probe(str_from_bytes(jpeg, sizeof(jpeg)), &width, &height, S("failed to probe"),
+                         S("a.jpg"), &probe_log) == -1);
+  TEST_CHECK(test_log_is(&probe_log,
+                         "failed to probe: image exceeds max dimension (20000 pixels) at "
+                         "20001 x 1 ('a.jpg')\n"));
 
   struct Image decoded = {0};
-  TEST_CHECK(image_decode(jpeg, sizeof(jpeg), 1, 1, &decoded, reason, sizeof(reason)) == -1);
-  TEST_CHECK(strcmp(reason, "image exceeds max dimension (20000 pixels): 20001 x 1") == 0);
+  struct Log decode_log = test_log();
+  TEST_CHECK(image_decode(str_from_bytes(jpeg, sizeof(jpeg)), &decoded, S("failed to decode"),
+                          S("a.jpg"), &decode_log) == -1);
+  TEST_CHECK(test_log_is(&decode_log,
+                         "failed to decode: image exceeds max dimension (20000 "
+                         "pixels) at 20001 x 1 ('a.jpg')\n"));
   TEST_CHECK(decoded.pixels == NULL);
+}
+
+// Dimensions each within `IMAGE_DIMENSION_MAX` whose product passes `IMAGE_PIXEL_COUNT_MAX` are
+// rejected too, in the same limit shape: 20000 x 5001 is 100020000 pixels.
+static void test_image_probe_rejects_oversized_pixel_count(void) {
+  static const unsigned char jpeg[] = {
+      0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x13, 0x89, 0x4E, 0x20, 0x03,
+      0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xFF, 0xD9,
+  };
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
+  struct Log log = test_log();
+  TEST_CHECK(image_probe(str_from_bytes(jpeg, sizeof(jpeg)), &width, &height, S("failed to probe"),
+                         S("a.jpg"), &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "failed to probe: image exceeds max pixel count (100000000 pixels) at "
+                         "20000 x 5001 ('a.jpg')\n"));
 }
 
 // Probing and decoding reject an input longer than stb can index before reading any of it.
 static void test_image_probe_rejects_oversized_input(void) {
   static const unsigned char jpeg[] = {0xFF, 0xD8};
-  const size_t data_len = (size_t)IMAGE_INPUT_LEN_MAX + 1U;
-  size_t width = 0;
-  size_t height = 0;
-  char reason[IMAGE_REASON_SIZE];
-  TEST_CHECK(image_probe(jpeg, data_len, &width, &height, reason, sizeof(reason)) == -1);
-  TEST_CHECK(strcmp(reason,
-                    "JPEG input exceeds max JPEG input length (2147483647 bytes) at 2147483648 "
-                    "bytes") == 0);
+  const ptrdiff_t data_len = (ptrdiff_t)IMAGE_INPUT_LEN_MAX + 1;
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
+  struct Log probe_log = test_log();
+  TEST_CHECK(image_probe(str_from_bytes(jpeg, data_len), &width, &height, S("failed to probe"),
+                         S("a.jpg"), &probe_log) == -1);
+  TEST_CHECK(test_log_is(&probe_log,
+                         "failed to probe: JPEG input exceeds max JPEG input length (2147483647 "
+                         "bytes) at 2147483648 bytes ('a.jpg')\n"));
 
   struct Image decoded = {0};
-  TEST_CHECK(image_decode(jpeg, data_len, 1, 1, &decoded, reason, sizeof(reason)) == -1);
-  TEST_CHECK(strcmp(reason,
-                    "JPEG input exceeds max JPEG input length (2147483647 bytes) at 2147483648 "
-                    "bytes") == 0);
+  struct Log decode_log = test_log();
+  TEST_CHECK(image_decode(str_from_bytes(jpeg, data_len), &decoded, S("failed to decode"),
+                          S("a.jpg"), &decode_log) == -1);
+  TEST_CHECK(test_log_is(&decode_log,
+                         "failed to decode: JPEG input exceeds max JPEG input length (2147483647 "
+                         "bytes) at 2147483648 bytes ('a.jpg')\n"));
   TEST_CHECK(decoded.pixels == NULL);
 }
 
-// The resize boundary uses the pinned stb v2 sRGB API and returns independently owned pixels.
+// A decode that runs out of memory inside stb ends in `os_oom` through the allocator hooks in
+// `vendor/stb/stb.c`, rather than failing as an invalid JPEG. It needs an address-space limit the
+// system enforces, and an allocator that reports a failure, so it runs on Linux without sanitizers.
+static void test_image_decode_failure_inside_stb_ends_in_oom(void) {
+#ifdef TEST_HAS_ADDRESS_LIMIT
+  enum { FIXTURE_SIDE_PX = 3000 };
+  const ptrdiff_t pixel_len = (ptrdiff_t)FIXTURE_SIDE_PX * FIXTURE_SIDE_PX * IMAGE_CHANNEL_COUNT;
+  struct Image fixture = {.pixels = image_alloc((size_t)pixel_len),
+                          .width_px = FIXTURE_SIDE_PX,
+                          .height_px = FIXTURE_SIDE_PX};
+  memset(fixture.pixels, 0, (size_t)pixel_len);
+  struct Arena arena = test_arena();
+  struct Str encoded = {0};
+  const int encode_rc = encode_fixture(&fixture, &arena, &encoded);
+  image_free(&fixture);
+  if (encode_rc != 0) {
+    return;
+  }
+  struct DecodeInput input = {.data = encoded};
+  TEST_CHECK(test_is_oom(decode_under_address_limit, &input));
+#else
+  TEST_SKIP("needs an enforced RLIMIT_AS and an unsanitized allocator");
+#endif
+}
+
+// The region resize, over the whole source, uses the pinned stb v2 sRGB API and returns
+// independently owned pixels.
 static void test_image_resize_constant_color(void) {
   unsigned char pixels[] = {
       25, 100, 225, 25, 100, 225, 25, 100, 225, 25, 100, 225,
   };
   const struct Image source = {.pixels = pixels, .width_px = 2, .height_px = 2};
   struct Image resized = {0};
-  char reason[IMAGE_REASON_SIZE];
-  TEST_ASSERT(image_resize(&source, 1, 1, &resized, reason, sizeof(reason)) == 0);
+  struct Log log = test_log();
+  TEST_ASSERT(image_resize_region(&source, 0, 0, 2, 2, 1, 1, &resized, S("failed to resize"),
+                                  S("a.jpg"), &log) == 0);
   TEST_CHECK(resized.width_px == 1);
   TEST_CHECK(resized.height_px == 1);
   TEST_CHECK(abs((int)resized.pixels[0] - 25) <= 1);
@@ -190,10 +361,10 @@ static void test_image_resize_constant_color(void) {
 
 // Center-crop geometry selects the largest rectangle with the requested aspect ratio.
 static void test_image_center_crop_geometry(void) {
-  size_t x = 0;
-  size_t y = 0;
-  size_t width = 0;
-  size_t height = 0;
+  ptrdiff_t x = 0;
+  ptrdiff_t y = 0;
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
   image_center_crop(8, 4, 1, 1, &x, &y, &width, &height);
   TEST_CHECK(x == 2 && y == 0 && width == 4 && height == 4);
 
@@ -211,12 +382,12 @@ static void test_image_resize_center_region(void) {
   };
   const struct Image source = {.pixels = pixels, .width_px = 4, .height_px = 2};
   struct Image resized = {0};
-  char reason[IMAGE_REASON_SIZE];
-  TEST_ASSERT(image_resize_region(&source, 1, 0, 2, 2, 2, 2, &resized, reason, sizeof(reason)) ==
-              0);
+  struct Log log = test_log();
+  TEST_ASSERT(image_resize_region(&source, 1, 0, 2, 2, 2, 2, &resized, S("failed to resize"),
+                                  S("a.jpg"), &log) == 0);
   TEST_CHECK(resized.width_px == 2 && resized.height_px == 2);
-  for (size_t y = 0; y < 2; y++) {
-    for (size_t channel = 0; channel < IMAGE_CHANNEL_COUNT; channel++) {
+  for (ptrdiff_t y = 0; y < 2; y++) {
+    for (ptrdiff_t channel = 0; channel < IMAGE_CHANNEL_COUNT; channel++) {
       TEST_CHECK(resized.pixels[(y * 2) * IMAGE_CHANNEL_COUNT + channel] == 2);
       TEST_CHECK(resized.pixels[(y * 2 + 1) * IMAGE_CHANNEL_COUNT + channel] == 3);
     }
@@ -246,15 +417,15 @@ static void test_image_orient_all_eight_values(void) {
 // Orientation-size follows the same transposition rule as the pixel transform.
 static void test_image_orient_size(void) {
   for (int value = IMAGE_ORIENTATION_TOP_LEFT; value <= IMAGE_ORIENTATION_BOTTOM_LEFT; value++) {
-    size_t width = 0;
-    size_t height = 0;
+    ptrdiff_t width = 0;
+    ptrdiff_t height = 0;
     image_orient_size((enum ImageOrientation)value, 2, 3, &width, &height);
     TEST_CHECK(width == 2);
     TEST_CHECK(height == 3);
   }
   for (int value = IMAGE_ORIENTATION_LEFT_TOP; value <= IMAGE_ORIENTATION_LEFT_BOTTOM; value++) {
-    size_t width = 0;
-    size_t height = 0;
+    ptrdiff_t width = 0;
+    ptrdiff_t height = 0;
     image_orient_size((enum ImageOrientation)value, 2, 3, &width, &height);
     TEST_CHECK(width == 3);
     TEST_CHECK(height == 2);
@@ -265,15 +436,11 @@ static void test_image_orient_size(void) {
 // copy.
 static void test_image_orient_top_left_keeps_buffer(void) {
   static const unsigned char source_pixels[] = {1, 2, 3};
-  struct Image image = {.pixels = malloc(sizeof(source_pixels)), .width_px = 1, .height_px = 1};
-  TEST_ASSERT(image.pixels != NULL);
-  if (image.pixels == NULL) {
-    return;
-  }
+  struct Image image = {
+      .pixels = image_alloc(sizeof(source_pixels)), .width_px = 1, .height_px = 1};
   memcpy(image.pixels, source_pixels, sizeof(source_pixels));
   unsigned char* const pixels = image.pixels;
-  char reason[IMAGE_REASON_SIZE];
-  TEST_ASSERT(image_orient(&image, IMAGE_ORIENTATION_TOP_LEFT, reason, sizeof(reason)) == 0);
+  image_orient(&image, IMAGE_ORIENTATION_TOP_LEFT);
   TEST_CHECK(image.pixels == pixels);
   TEST_CHECK(image.width_px == 1);
   TEST_CHECK(image.height_px == 1);
@@ -281,33 +448,16 @@ static void test_image_orient_top_left_keeps_buffer(void) {
   image_free(&image);
 }
 
-// Invalid target dimensions and quality fail at the boundary with exact diagnostics.
-static void test_image_rejects_invalid_arguments(void) {
-  unsigned char pixels[] = {1, 2, 3};
-  const struct Image source = {.pixels = pixels, .width_px = 1, .height_px = 1};
-  struct Image resized = {0};
-  char reason[IMAGE_REASON_SIZE];
-  TEST_CHECK(image_resize(&source, 0, 1, &resized, reason, sizeof(reason)) == -1);
-  TEST_CHECK(strcmp(reason, "image dimensions must be positive: 0 x 1") == 0);
-  TEST_CHECK(image_resize(&source, IMAGE_DIMENSION_MAX + 1U, 1, &resized, reason, sizeof(reason)) ==
-             -1);
-  TEST_CHECK(strcmp(reason, "image exceeds max dimension (20000 pixels): 20001 x 1") == 0);
-
-  unsigned char* encoded = NULL;
-  size_t encoded_len = 0;
-  TEST_CHECK(image_encode_jpeg(&source, 0, &encoded, &encoded_len, reason, sizeof(reason)) == -1);
-  TEST_CHECK(strcmp(reason, "JPEG quality must be from 1 through 100: 0") == 0);
-  TEST_CHECK(encoded == NULL);
-  TEST_CHECK(encoded_len == 0);
+// A pixel allocation that cannot succeed ends in `os_oom`, as every other allocation does, rather
+// than returning `NULL` to a caller that would report a decode error.
+static void test_image_alloc_ends_in_oom(void) {
+  TEST_CHECK(test_is_oom(alloc_beyond_object_len, NULL));
+  TEST_CHECK(test_is_oom(realloc_beyond_object_len, NULL));
 }
 
 // Freeing is idempotent and always restores the documented zero state.
 static void test_image_free_is_idempotent(void) {
-  struct Image image = {.pixels = malloc(3), .width_px = 1, .height_px = 1};
-  TEST_ASSERT(image.pixels != NULL);
-  if (image.pixels == NULL) {
-    return;
-  }
+  struct Image image = {.pixels = image_alloc(3), .width_px = 1, .height_px = 1};
   image_free(&image);
   TEST_CHECK(image.pixels == NULL);
   TEST_CHECK(image.width_px == 0);
@@ -321,15 +471,19 @@ TEST_LIST = {
     {"image fit preserves aspect ratio", test_image_fit_preserves_aspect_ratio},
     {"image fit clamps to one pixel", test_image_fit_clamps_to_one_pixel},
     {"image encode probe and decode", test_image_encode_probe_and_decode},
+    {"image encode is deterministic in perm", test_image_encode_is_deterministic_in_perm},
     {"image probe rejects oversized dimensions", test_image_probe_rejects_oversized_dimensions},
+    {"image probe rejects oversized pixel count", test_image_probe_rejects_oversized_pixel_count},
     {"image probe rejects oversized input", test_image_probe_rejects_oversized_input},
+    {"image decode failure inside stb ends in oom",
+     test_image_decode_failure_inside_stb_ends_in_oom},
     {"image resize constant color", test_image_resize_constant_color},
     {"image center crop geometry", test_image_center_crop_geometry},
     {"image resize center region", test_image_resize_center_region},
     {"image orient all eight values", test_image_orient_all_eight_values},
     {"image orient size", test_image_orient_size},
     {"image orient top left keeps buffer", test_image_orient_top_left_keeps_buffer},
-    {"image rejects invalid arguments", test_image_rejects_invalid_arguments},
+    {"image alloc ends in oom", test_image_alloc_ends_in_oom},
     {"image free is idempotent", test_image_free_is_idempotent},
     {NULL, NULL},
 };

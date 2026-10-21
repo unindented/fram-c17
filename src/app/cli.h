@@ -3,9 +3,11 @@
 
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdio.h>
 
-#include "core/error.h"
+#include "shared/str.h"
+
+struct Arena;
+struct Os;
 
 /** Action the parsed command line selected, resolved by precedence in `cli_parse`. */
 enum CliAction {
@@ -44,17 +46,20 @@ struct CliOptions {
 
   /**
    * Requested worker count, or `0` when `--workers` was not given. `0` is never a valid request,
-   * because `cli_parse_workers_option` rejects it, so it serves as the unset sentinel. That
-   * function also caps the accepted value, so a stored count is always one the pool can reasonably
-   * run. `BuildOptions.worker_count` documents `0` the same way.
+   * because `cli_parse_workers_option` rejects it, so it serves as the unset sentinel. The build
+   * caps the count at four per online CPU. `BuildOptions.worker_count` documents `0` the same way.
    */
-  size_t worker_count;
+  ptrdiff_t worker_count;
 
   /** Whether the caller requested progress and status messages. */
   bool is_verbose;
 
-  /** Failure diagnostic, non-empty when `action` is `CLI_ACTION_ERROR`. */
-  char error_message[ERROR_MESSAGE_SIZE];
+  /**
+   * Failure diagnostic, non-empty exactly when `action` is `CLI_ACTION_ERROR`. It is a formatted
+   * copy in the arena `cli_parse` was given, so it holds no pointer into `argv` or into copt's
+   * scratch storage.
+   */
+  struct Str error_message;
 };
 
 /**
@@ -66,40 +71,46 @@ struct CliOptions {
  * arguments). It leaves `argv[0]` untouched.
  *
  * `options` retains no pointer into `argv`, so the result stays valid however the caller later
- * reorders or overwrites `argv`. `error_message` is a fixed inline buffer holding a formatted copy,
- * so the diagnostic itself does not retain a pointer into copt's scratch storage. That is also why
- * it is an array rather than a `const char*`. A short option's spelling lives in the parser that
- * `cli_parse` keeps on its own stack, so a later change to avoid the copy would hand back a pointer
- * that dangles as soon as `cli_parse` returns.
+ * reorders or overwrites `argv`. `error_message` is a formatted copy in `arena`, so the diagnostic
+ * does not retain a pointer into copt's scratch storage either. A short option's spelling lives in
+ * the parser that `cli_parse` keeps on its own stack, so a later change to avoid the copy would
+ * hand back a pointer that dangles as soon as `cli_parse` returns.
  *
  * @param options Receives the fully resolved parse result. Must not be `NULL`.
  * @param argc    Argument count.
  * @param argv    Argument vector. Elements after `argv[0]` may be reordered. Must not be `NULL`.
+ * @param arena   Arena that owns `error_message`. Must not be `NULL`.
  */
-void cli_parse(struct CliOptions* options, int argc, char** argv) __attribute__((nonnull(1, 3)));
+void cli_parse(struct CliOptions* options, int argc, char** argv, struct Arena* arena)
+    __attribute__((nonnull(1, 3, 4)));
 
 /**
- * @brief Writes the `fram <version>` line to `stream`.
+ * @brief Writes the `fram <version>` line to standard output.
  *
- * @param stream Destination stream. Must not be `NULL`.
- * @return `0` on success, or `-1` if writing to `stream` failed, with `errno` set by the failing
- *         write, or to `EIO` when the stream had latched an error earlier and the original `errno`
- *         is no longer available, so the caller always has a reason to report.
+ * The line is formatted whole and printed in one `os_print` call.
+ *
+ * @param os      Host to print on. Must not be `NULL`.
+ * @param scratch Arena the line is formatted in.
+ * @return `0` on success, or `-1` when the write fails.
  */
-int cli_print_version(FILE* stream) __attribute__((nonnull(1)));
+int cli_print_version(struct Os* os, struct Arena scratch) __attribute__((nonnull(1)));
 
 /**
- * @brief Writes usage and option help for `command` to `stream`.
+ * @brief Writes usage and option help for `command` to standard output.
  *
- * Prints command-specific help when a command is selected, otherwise the top-level summary.
+ * Prints command-specific help when a command is selected, otherwise the top-level summary. The
+ * text is formatted whole and printed in one `os_print` call.
  *
- * @param stream       Destination stream. Must not be `NULL`.
- * @param program_name Program name to show in usage lines. Must not be `NULL`.
+ * @param program_name Program name to show in usage lines, such as `argv[0]`.
  * @param command      Command whose help to print, or `CLI_COMMAND_NONE` for the summary.
- * @return `0` on success, or `-1` if writing to `stream` failed, with `errno` set as for
- *         `cli_print_version`.
+ * @param os           Host to print on. Must not be `NULL`.
+ * @param scratch      Arena the text is formatted in. The program name is bounded only by
+ *                     `ARG_MAX`, so it must hold several times that.
+ * @return `0` on success, or `-1` when the write fails.
  */
-int cli_print_usage(FILE* stream, const char* program_name, enum CliCommand command)
-    __attribute__((nonnull(1, 2)));
+int cli_print_usage(struct Str program_name,
+                    enum CliCommand command,
+                    struct Os* os,
+                    struct Arena scratch) __attribute__((nonnull(3)));
 
 #endif

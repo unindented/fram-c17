@@ -10,9 +10,19 @@ target_sources(
 target_link_libraries(fram_app PRIVATE fram_vendor_mustache)
 
 if(FRAM_BUILD_TESTING)
-  foreach(module IN ITEMS album_scanner derivative_renderer job manifest_builder output_path
-                          page_renderer site_writer template
-  )
+  foreach(module IN ITEMS output_path template)
     fram_add_unit_test(${module})
+  endforeach()
+  # The video cases of the scanner and the renderer are executables of their own on the POSIX host:
+  # a video's frame is a file on the real host, and the scanner's cases run `ffprobe` and `ffmpeg`
+  # fakes.
+  foreach(module IN ITEMS album_scanner_video derivative_renderer_video)
+    fram_add_unit_test(${module})
+  endforeach()
+  # These read and write only through `runtime/os.h`, so they run against the in-memory host.
+  foreach(module IN ITEMS album_scanner derivative_renderer job manifest_builder page_renderer
+                          site_writer
+  )
+    fram_add_unit_test(${module} OS memory)
   endforeach()
 endif()

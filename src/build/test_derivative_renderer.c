@@ -1,28 +1,30 @@
-#define _DARWIN_C_SOURCE
-#define _DEFAULT_SOURCE
-
 #include <acutest.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <time.h>
-#include <unistd.h>
 
 #include "build/derivative_renderer.h"
+#include "build/job.h"
+#include "build/test_derivative_renderer.h"
+#include "build/test_job_arenas.h"
 #include "build/test_jpeg.h"
 #include "core/error.h"
-#include "core/path.h"
 #include "domain/gallery_config.h"
 #include "domain/media_item.h"
 #include "formats/image.h"
-#include "runtime/fs.h"
+#include "os_memory.h"
+#include "runtime/os.h"
+#include "runtime/video.h"
 #include "shared/arena.h"
-#include "shared/string_buffer.h"
+#include "shared/buf.h"
+#include "shared/log.h"
+#include "shared/str.h"
 #include "test_support.h"
+
+// Every test here runs against the in-memory host: an image job reads its source and writes its
+// outputs only through `runtime/os.h`. The video case, whose frame is a file `ffmpeg` writes on the
+// real host, is in `test_derivative_renderer_video.c`.
 
 /** Largest file a test here reads back, in bytes. Fixture JPEGs are a few kilobytes. */
 enum { TEST_FILE_LEN_MAX = 1024 * 1024 };
@@ -33,26 +35,29 @@ enum { TEST_FILE_LEN_MAX = 1024 * 1024 };
  * The stored image is 16x8 with a red left half and a blue right half, so orientation 6 presents it
  * as a red top half over a blue bottom half.
  *
- * @param data_out     Receives the encoded JPEG the caller must `free`. Must not be `NULL`.
- * @param data_len_out Receives the length of the encoded JPEG in bytes. Must not be `NULL`.
- * @return `0` on success, or `-1` on an encode or allocation failure.
+ * @param arena    Arena that receives the encoded JPEG. Must not be `NULL`.
+ * @param jpeg_out Receives the encoded JPEG, which lives as long as `arena`. Must not be `NULL`.
+ * @return `0` on success, or `-1` on an encode failure.
  */
-static int make_oriented_jpeg(unsigned char** data_out, size_t* data_len_out) {
+static int make_oriented_jpeg(struct Arena* arena, struct Str* jpeg_out) {
   enum { WIDTH = 16, HEIGHT = 8 };
   unsigned char pixels[WIDTH * HEIGHT * IMAGE_CHANNEL_COUNT];
-  for (size_t y = 0; y < HEIGHT; y++) {
-    for (size_t x = 0; x < WIDTH; x++) {
-      const size_t offset = (y * WIDTH + x) * IMAGE_CHANNEL_COUNT;
+  for (ptrdiff_t y = 0; y < HEIGHT; y++) {
+    for (ptrdiff_t x = 0; x < WIDTH; x++) {
+      const ptrdiff_t offset = (y * WIDTH + x) * IMAGE_CHANNEL_COUNT;
       pixels[offset] = x < WIDTH / 2 ? 240 : 10;
       pixels[offset + 1] = 10;
       pixels[offset + 2] = x < WIDTH / 2 ? 10 : 240;
     }
   }
   const struct Image image = {.pixels = pixels, .width_px = WIDTH, .height_px = HEIGHT};
-  unsigned char* encoded = NULL;
-  size_t encoded_len = 0;
-  if (image_encode_jpeg(&image, 100, &encoded, &encoded_len, NULL, 0) != 0 || encoded_len < 2) {
-    free(encoded);
+  struct Str encoded = {0};
+  struct Log log = test_log();
+  if (image_encode_jpeg(&image, 100, arena, &encoded, S("failed to encode fixture"),
+                        S("fixture.jpg"), &log) != 0) {
+    return -1;
+  }
+  if (encoded.len < 2) {
     return -1;
   }
   static const unsigned char app1[] = {
@@ -60,76 +65,47 @@ static int make_oriented_jpeg(unsigned char** data_out, size_t* data_len_out) {
       0x00, 0x2A, 0x00, 0x00, 0x00, 0x08, 0x00, 0x01, 0x01, 0x12, 0x00, 0x03,
       0x00, 0x00, 0x00, 0x01, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   };
-  if (encoded_len > SIZE_MAX - sizeof(app1)) {
-    free(encoded);
-    return -1;
-  }
-  unsigned char* oriented = malloc(encoded_len + sizeof(app1));
-  if (oriented == NULL) {
-    free(encoded);
-    return -1;
-  }
-  memcpy(oriented, encoded, 2);
-  memcpy(oriented + 2, app1, sizeof(app1));
-  memcpy(oriented + 2 + sizeof(app1), encoded + 2, encoded_len - 2);
-  free(encoded);
-  *data_out = oriented;
-  *data_len_out = encoded_len + sizeof(app1);
+  struct Buf oriented = {.arena = arena};
+  buf_append(&oriented, str_head(encoded, 2));
+  buf_append(&oriented, str_from_bytes(app1, (ptrdiff_t)sizeof(app1)));
+  buf_append(&oriented, str_tail(encoded, 2));
+  *jpeg_out = buf_str(&oriented);
   return 0;
 }
 
 /**
- * @brief Populates one media item with three derivatives and an original below `root_dir`.
+ * @brief Populates one media item with three derivatives below `public/` and an original.
  *
- * The derivatives are named `s`, `m`, and `l` and match the ones `init_config` configures.
+ * The derivatives are named `s`, `m`, and `l` and match the ones
+ * `test_derivative_renderer_init_config` configures.
  *
- * @param item     Item to populate. Must not be `NULL`.
- * @param kind     Media kind of the item.
- * @param root_dir Fixture root the source and output paths are joined under. Must not be `NULL`.
- * @param name     Source filename relative to `root_dir`, also used as the title. Must not be
- *                 `NULL`.
- * @param arena    Arena that owns the item's derivatives and paths. Must not be `NULL`.
- * @return `0` on success, or `-1` after failing the current test check.
+ * @param item  Item to populate. Must not be `NULL`.
+ * @param kind  Media kind of the item.
+ * @param name  Source filename below `photos/`, also used as the title. Must not be `NULL`.
+ * @param arena Arena that owns the item's derivatives and paths. Must not be `NULL`.
  */
-static int init_item(struct MediaItem* item,
-                     enum MediaKind kind,
-                     const char* root_dir,
-                     const char* name,
-                     struct Arena* arena) {
-  struct MediaDerivative* derivatives = arena_calloc(arena, 3, sizeof(*derivatives));
-  if (!TEST_CHECK(derivatives != NULL)) {
-    return -1;
-  }
+static void init_item(struct MediaItem* item,
+                      enum MediaKind kind,
+                      const char* name,
+                      struct Arena* arena) {
+  struct MediaDerivative* derivatives = arena_new(arena, 3, struct MediaDerivative);
   derivatives[0] = (struct MediaDerivative){
-      .name = "s",
-      .path = path_join(root_dir, "public/s.jpg", arena),
-      .width_px = 2,
-      .height_px = 2,
-  };
+      .name = S("s"), .path = S("public/s.jpg"), .width_px = 2, .height_px = 2};
   derivatives[1] = (struct MediaDerivative){
-      .name = "m",
-      .path = path_join(root_dir, "public/m.jpg", arena),
-      .width_px = 8,
-      .height_px = 4,
-  };
+      .name = S("m"), .path = S("public/m.jpg"), .width_px = 8, .height_px = 4};
   derivatives[2] = (struct MediaDerivative){
-      .name = "l",
-      .path = path_join(root_dir, "public/l.jpg", arena),
-      .width_px = 8,
-      .height_px = 4,
-  };
+      .name = S("l"), .path = S("public/l.jpg"), .width_px = 8, .height_px = 4};
   *item = (struct MediaItem){
-      .source_path = path_join(root_dir, name, arena),
-      .title = name,
+      .source_path = str_concat(S("photos/"), str_from_cstr(name), arena),
+      .title = str_clone(str_from_cstr(name), arena),
       .kind = kind,
       .derivatives = derivatives,
       .derivative_count = 3,
-      .original_path = path_join(root_dir, "public/original.bin", arena),
+      .original_path = S("public/original.bin"),
       .orientation = IMAGE_ORIENTATION_TOP_LEFT,
       .width_px = 8,
       .height_px = 4,
   };
-  return 0;
 }
 
 /**
@@ -139,551 +115,306 @@ static int init_item(struct MediaItem* item,
  * several items calls this after `init_item` so the jobs do not write one another's files.
  *
  * @param item       Item `init_item` populated. Must not be `NULL`.
- * @param root_dir   Fixture root the output paths are joined under. Must not be `NULL`.
- * @param output_dir Output directory relative to `root_dir`. Must not be `NULL`.
- * @param stem       Output filename stem, distinct per item. Must not be `NULL`.
+ * @param output_dir Terminated output directory. Must not be `NULL`.
+ * @param stem       Terminated output filename stem, distinct per item. Must not be `NULL`.
  * @param arena      Arena that owns the new paths. Must not be `NULL`.
- * @return `0` on success, or `-1` after failing the current test check.
  */
-static int relocate_item_outputs(struct MediaItem* item,
-                                 const char* root_dir,
-                                 const char* output_dir,
-                                 const char* stem,
-                                 struct Arena* arena) {
-  char relative[256];
-  for (size_t i = 0; i < item->derivative_count; i++) {
-    const int relative_len = snprintf(relative, sizeof(relative), "%s/%s-%s.jpg", output_dir, stem,
-                                      item->derivatives[i].name);
-    if (!TEST_CHECK(relative_len > 0 && (size_t)relative_len < sizeof(relative))) {
-      return -1;
-    }
-    item->derivatives[i].path = path_join(root_dir, relative, arena);
-    if (!TEST_CHECK(item->derivatives[i].path != NULL)) {
-      return -1;
-    }
+static void relocate_item_outputs(struct MediaItem* item,
+                                  const char* output_dir,
+                                  const char* stem,
+                                  struct Arena* arena) {
+  for (ptrdiff_t i = 0; i < item->derivative_count; i++) {
+    struct Buf path = {.arena = arena};
+    buf_printf(&path, "%s/%s-%.*s.jpg", output_dir, stem, STR_FMT(item->derivatives[i].name));
+    item->derivatives[i].path = buf_str(&path);
   }
-  const int relative_len =
-      snprintf(relative, sizeof(relative), "%s/originals/%s.jpg", output_dir, stem);
-  if (!TEST_CHECK(relative_len > 0 && (size_t)relative_len < sizeof(relative))) {
-    return -1;
-  }
-  item->original_path = path_join(root_dir, relative, arena);
-  return TEST_CHECK(item->original_path != NULL) ? 0 : -1;
+  struct Buf path = {.arena = arena};
+  buf_printf(&path, "%s/originals/%s.jpg", output_dir, stem);
+  item->original_path = buf_str(&path);
 }
 
 /**
- * @brief Initializes a configuration with the three derivatives `init_item` plans.
+ * @brief Reads one generated JPEG and probes its dimensions, recording why when it cannot.
  *
- * `s` and `m` crop, and `l` fits. The derivative array is static, so the configuration needs no
- * release and only one may be live at a time.
- *
- * @param config       Configuration to initialize. Must not be `NULL`.
- * @param small_width  Width of the `s` derivative in pixels.
- * @param small_height Height of the `s` derivative in pixels.
- * @param large_width  Width bound of the `l` derivative in pixels.
- * @param large_height Height bound of the `l` derivative in pixels.
- * @param quality      JPEG quality shared by every derivative, from 1 through 100.
- */
-static void init_config(struct GalleryConfig* config,
-                        size_t small_width,
-                        size_t small_height,
-                        size_t large_width,
-                        size_t large_height,
-                        size_t quality) {
-  static struct GalleryDerivative derivatives[3];
-  derivatives[0] = (struct GalleryDerivative){.name = "s",
-                                              .width_px = small_width,
-                                              .height_px = small_height,
-                                              .quality = quality,
-                                              .is_crop = true};
-  derivatives[1] = (struct GalleryDerivative){
-      .name = "m", .width_px = 8, .height_px = 4, .quality = quality, .is_crop = true};
-  derivatives[2] = (struct GalleryDerivative){.name = "l",
-                                              .width_px = large_width,
-                                              .height_px = large_height,
-                                              .quality = quality,
-                                              .is_crop = false};
-  *config = (struct GalleryConfig){
-      .derivatives = derivatives,
-      .derivative_count = 3,
-  };
-}
-
-/**
- * @brief Reads one generated JPEG and probes its dimensions.
- *
- * @param path       JPEG file to read. Must not be `NULL`.
+ * @param path       JPEG file to read.
+ * @param os         Host holding the file. Must not be `NULL`.
+ * @param scratch    Arena for the file bytes.
  * @param width_out  Receives the width in pixels on success. Must not be `NULL`.
  * @param height_out Receives the height in pixels on success. Must not be `NULL`.
  * @return `0` on success, or `-1` when the file cannot be read or probed.
  */
-static int probe_file(const char* path, size_t* width_out, size_t* height_out) {
-  unsigned char* data = NULL;
-  size_t data_len = 0;
-  if (fs_read_file(path, TEST_FILE_LEN_MAX, &data, &data_len, NULL, 0) != 0) {
-    return -1;
-  }
-  const int rc = image_probe(data, data_len, width_out, height_out, NULL, 0);
-  free(data);
+static int probe_file(struct Str path,
+                      struct Os* os,
+                      struct Arena scratch,
+                      ptrdiff_t* width_out,
+                      ptrdiff_t* height_out) {
+  struct Str data = {0};
+  struct Log log = test_log();
+  const int rc =
+      os_read(os, path, TEST_FILE_LEN_MAX, &scratch, &data, S("failed to read output"), &log) == 0
+          ? image_probe(data, width_out, height_out, S("failed to probe output"), path, &log)
+          : -1;
+  const struct Str failure = buf_str(&log.buf);
+  TEST_MSG("%.*s", STR_FMT(failure));
   return rc;
 }
 
 /**
- * @brief Backdates a file's access and modification times to before a reference timestamp.
+ * @brief Reports whether two `os_stat` results carry the same modification time.
  *
- * @param path      File to backdate. Must not be `NULL`.
- * @param reference Metadata whose modification time the file must end up older than. Must not be
- *                  `NULL`.
- * @return `0` on success, or `-1` with `errno` set when the times cannot be changed.
+ * @param a First result. Must not be `NULL`.
+ * @param b Second result. Must not be `NULL`.
+ * @return `true` when both the seconds and the nanoseconds agree.
  */
-static int set_older_mtime(const char* path, const struct FsMeta* reference) {
-  const time_t seconds = (time_t)(reference->mtime_s > 10 ? reference->mtime_s - 10 : 0);
-  const struct timespec times[] = {
-      {.tv_sec = seconds, .tv_nsec = reference->mtime_ns},
-      {.tv_sec = seconds, .tv_nsec = reference->mtime_ns},
-  };
-  return utimensat(AT_FDCWD, path, times, 0);
+static bool is_same_mtime(const struct OsStat* a, const struct OsStat* b) {
+  return a->mtime_s == b->mtime_s && a->mtime_ns == b->mtime_ns;
 }
 
 /**
- * @brief Runs a verbose derivative phase while capturing standard error.
+ * @brief Runs a derivative phase over fresh worker arenas, reading sources up to the decoder's own
+ *        input limit.
  *
- * Restores standard error before returning.
- *
- * @param gallery_config    Configured derivatives shared by every job.
- * @param media             Media items, one job per item.
- * @param media_count       Number of items in `media`.
- * @param video_frame_paths Video frame paths, one per item in `media`.
- * @param worker_count      Number of worker threads to request.
- * @param error_out         Buffer that receives derivative diagnostics.
- * @param stderr_out        Buffer that receives terminated standard error.
- * @param stderr_out_len    Size of `stderr_out` in bytes. Must be non-zero.
- * @return The renderer result, or `TEST_PLUMBING_FAILED` on test-plumbing failure.
+ * @param gallery_config Configured derivatives shared by every job. Must not be `NULL`.
+ * @param media          Media items, one job per item. Must not be `NULL`.
+ * @param media_count    Number of items in `media`.
+ * @param video_frames   Video frame slots, one per item in `media`. Must not be `NULL`.
+ * @param worker_count   Number of worker threads to request.
+ * @param is_verbose     Whether each finished job prints a progress line.
+ * @param os             Host holding the sources, which receives the outputs. Must not be `NULL`.
+ * @param log            Log that receives derivative errors. Must not be `NULL`.
+ * @return The renderer result.
  */
-static int generate_capturing_stderr(const struct GalleryConfig* gallery_config,
-                                     struct MediaItem* const* media,
-                                     size_t media_count,
-                                     char* const* video_frame_paths,
-                                     size_t worker_count,
-                                     struct StringBuffer* error_out,
-                                     char* stderr_out,
-                                     size_t stderr_out_len) {
-  stderr_out[0] = '\0';
-  struct StreamCapture stderr_capture;
-  if (capture_begin(stderr, &stderr_capture) != 0) {
-    return TEST_PLUMBING_FAILED;
+static int generate(const struct GalleryConfig* gallery_config,
+                    struct MediaItem* const* media,
+                    ptrdiff_t media_count,
+                    struct VideoFrame* video_frames,
+                    ptrdiff_t worker_count,
+                    bool is_verbose,
+                    struct Os* os,
+                    struct Log* log) {
+  struct Arena arenas_perm = test_arena();
+  return derivative_renderer_generate(gallery_config, media, media_count, video_frames,
+                                      worker_count, test_job_arenas(worker_count, &arenas_perm),
+                                      is_verbose, os, test_arena(), log);
+}
+
+/**
+ * @brief Generates the derivatives of the orientation-6 JPEG from `make_oriented_jpeg`, padded with
+ *        `NUL` bytes to `source_len`, and checks the large one and the copied original's size.
+ *
+ * Orientation 6 turns a stored left/right color split into a presented top/bottom split. Checking
+ * both regions distinguishes it from a distorted resize.
+ *
+ * @param source_len Size of the source file in bytes. A value below the JPEG's own length leaves it
+ *                   unpadded.
+ */
+static void check_generate_applies_orientation(ptrdiff_t source_len) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct MediaItem item;
+  struct Str jpeg = {0};
+  struct GalleryConfig config;
+  test_derivative_renderer_init_config(&config, 2, 4, 16, 16, 95);
+  struct MediaItem* media[] = {&item};
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  struct Image decoded = {0};
+  init_item(&item, MEDIA_KIND_IMAGE, "oriented.jpg", &arena);
+  item.derivatives[0].width_px = 2;
+  item.derivatives[0].height_px = 4;
+  item.derivatives[2].width_px = 8;
+  item.derivatives[2].height_px = 16;
+  if (!TEST_CHECK(make_oriented_jpeg(&arena, &jpeg) == 0)) {
+    return;
   }
-  const int rc = derivative_renderer_generate(gallery_config, media, media_count, video_frame_paths,
-                                              worker_count, true, error_out);
-  return capture_end(&stderr_capture, stderr_out, stderr_out_len) == 0 ? rc : TEST_PLUMBING_FAILED;
+  os_memory_write_bytes(os, item.source_path, jpeg);
+  const char* source = str_cstr(item.source_path, &arena);
+  os_memory_truncate(os, source, source_len > jpeg.len ? source_len : jpeg.len);
+
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
+  struct Str output = {0};
+  TEST_CHECK(os_memory_file(os, "public/l.jpg", &output) == 0);
+  TEST_CHECK(image_decode(output, &decoded, S("failed to decode output"), S("output.jpg"), &log) ==
+             0);
+  if (TEST_CHECK(decoded.width_px == 8 && decoded.height_px == 16)) {
+    const ptrdiff_t top = (2 * decoded.width_px + 4) * IMAGE_CHANNEL_COUNT;
+    const ptrdiff_t bottom = (13 * decoded.width_px + 4) * IMAGE_CHANNEL_COUNT;
+    TEST_CHECK(decoded.pixels[top] > decoded.pixels[top + 2]);
+    TEST_CHECK(decoded.pixels[bottom + 2] > decoded.pixels[bottom]);
+  }
+  image_free(&decoded);
+  struct OsStat original = {0};
+  TEST_CHECK(os_stat(os, item.original_path, &original) == 0 &&
+             original.len == (source_len > jpeg.len ? source_len : jpeg.len));
 }
 
 // Stale image outputs are generated at their planned dimensions and the original is copied
 // byte-for-byte. A second run preserves every output timestamp.
 static void test_generate_image_and_skip_fresh_outputs(void) {
-  char root_dir_template[] = "/tmp/fram-derivative-image.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct MediaItem item;
+  struct Str jpeg = {0};
+  struct GalleryConfig config;
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 90);
+  struct MediaItem* media[] = {&item};
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
+  init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
+  if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
     return;
   }
+  os_memory_write_bytes(os, item.source_path, jpeg);
 
-  struct Arena arena;
-  arena_init(&arena);
-  struct MediaItem item;
-  unsigned char* jpeg = NULL;
-  size_t jpeg_len = 0;
-  struct GalleryConfig config;
-  init_config(&config, 2, 2, 8, 8, 90);
-  struct MediaItem* media[] = {&item};
-  char* frames[] = {NULL};
-  struct StringBuffer error_buffer;
-  string_buffer_init(&error_buffer);
-  size_t width = 0;
-  size_t height = 0;
-  unsigned char* original = NULL;
-  size_t original_len = 0;
-  if (init_item(&item, MEDIA_KIND_IMAGE, root_dir, "source.jpg", &arena) != 0) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(test_jpeg_encode(8, 4, &jpeg, &jpeg_len) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.source_path, jpeg, jpeg_len, NULL, 0) == 0)) {
-    goto cleanup;
-  }
+  TEST_CHECK(generate(&config, media, 1, frames, 2, false, os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
 
-  TEST_CHECK(derivative_renderer_generate(&config, media, 1, frames, 2, false, &error_buffer) == 0);
-  TEST_CHECK(error_buffer.len == 0);
-
-  TEST_CHECK(probe_file(item.derivatives[0].path, &width, &height) == 0);
+  TEST_CHECK(probe_file(item.derivatives[0].path, os, arena, &width, &height) == 0);
   TEST_CHECK(width == 2 && height == 2);
-  TEST_CHECK(probe_file(item.derivatives[1].path, &width, &height) == 0);
+  TEST_CHECK(probe_file(item.derivatives[1].path, os, arena, &width, &height) == 0);
   TEST_CHECK(width == 8 && height == 4);
-  TEST_CHECK(probe_file(item.derivatives[2].path, &width, &height) == 0);
+  TEST_CHECK(probe_file(item.derivatives[2].path, os, arena, &width, &height) == 0);
   TEST_CHECK(width == 8 && height == 4);
+  struct Str original = {0};
+  TEST_CHECK(os_memory_file(os, "public/original.bin", &original) == 0 && str_eq(original, jpeg));
 
-  TEST_CHECK(
-      fs_read_file(item.original_path, TEST_FILE_LEN_MAX, &original, &original_len, NULL, 0) == 0);
-  TEST_CHECK(original_len == jpeg_len && memcmp(original, jpeg, jpeg_len) == 0);
-
-  struct FsMeta thumb_before;
-  struct FsMeta large_before;
-  struct FsMeta original_before;
-  TEST_CHECK(fs_stat_meta(item.derivatives[0].path, &thumb_before, NULL, 0) == 0);
-  TEST_CHECK(fs_stat_meta(item.derivatives[2].path, &large_before, NULL, 0) == 0);
-  TEST_CHECK(fs_stat_meta(item.original_path, &original_before, NULL, 0) == 0);
-  TEST_CHECK(derivative_renderer_generate(&config, media, 1, frames, 2, false, &error_buffer) == 0);
-  struct FsMeta after;
-  TEST_CHECK(fs_stat_meta(item.derivatives[0].path, &after, NULL, 0) == 0);
-  TEST_CHECK(after.mtime_s == thumb_before.mtime_s && after.mtime_ns == thumb_before.mtime_ns);
-  TEST_CHECK(fs_stat_meta(item.derivatives[2].path, &after, NULL, 0) == 0);
-  TEST_CHECK(after.mtime_s == large_before.mtime_s && after.mtime_ns == large_before.mtime_ns);
-  TEST_CHECK(fs_stat_meta(item.original_path, &after, NULL, 0) == 0);
-  TEST_CHECK(after.mtime_s == original_before.mtime_s &&
-             after.mtime_ns == original_before.mtime_ns);
-
-cleanup:
-  free(original);
-  string_buffer_free(&error_buffer);
-  free(jpeg);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  struct OsStat thumb_before;
+  struct OsStat large_before;
+  struct OsStat original_before;
+  TEST_CHECK(os_stat(os, item.derivatives[0].path, &thumb_before) == 0);
+  TEST_CHECK(os_stat(os, item.derivatives[2].path, &large_before) == 0);
+  TEST_CHECK(os_stat(os, item.original_path, &original_before) == 0);
+  TEST_CHECK(generate(&config, media, 1, frames, 2, false, os, &log) == 0);
+  struct OsStat after;
+  TEST_CHECK(os_stat(os, item.derivatives[0].path, &after) == 0 &&
+             is_same_mtime(&after, &thumb_before));
+  TEST_CHECK(os_stat(os, item.derivatives[2].path, &after) == 0 &&
+             is_same_mtime(&after, &large_before));
+  TEST_CHECK(os_stat(os, item.original_path, &after) == 0 &&
+             is_same_mtime(&after, &original_before));
 }
 
 // Freshness is decided separately: a fresh thumbnail remains untouched while a zero-byte large
 // derivative and a same-age original of the wrong size are regenerated.
 static void test_generate_refreshes_outputs_independently(void) {
-  char root_dir_template[] = "/tmp/fram-derivative-freshness.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct MediaItem item;
+  struct Str jpeg = {0};
+  struct GalleryConfig config;
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
+  struct MediaItem* media[] = {&item};
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
+  if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
     return;
   }
+  os_memory_write_bytes(os, item.source_path, jpeg);
 
-  struct Arena arena;
-  arena_init(&arena);
-  struct MediaItem item;
-  unsigned char* jpeg = NULL;
-  size_t jpeg_len = 0;
-  struct GalleryConfig config;
-  init_config(&config, 2, 2, 8, 8, 82);
-  struct MediaItem* media[] = {&item};
-  char* frames[] = {NULL};
-  struct StringBuffer error_buffer;
-  string_buffer_init(&error_buffer);
-  if (init_item(&item, MEDIA_KIND_IMAGE, root_dir, "source.jpg", &arena) != 0) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(test_jpeg_encode(8, 4, &jpeg, &jpeg_len) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.source_path, jpeg, jpeg_len, NULL, 0) == 0)) {
-    goto cleanup;
-  }
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
+  struct OsStat thumb_before;
+  TEST_CHECK(os_stat(os, item.derivatives[0].path, &thumb_before) == 0);
+  os_memory_write(os, "public/l.jpg", "");
+  os_memory_write(os, "public/original.bin", "x");
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
 
-  TEST_CHECK(derivative_renderer_generate(&config, media, 1, frames, 1, false, &error_buffer) == 0);
-  struct FsMeta thumb_before;
-  TEST_CHECK(fs_stat_meta(item.derivatives[0].path, &thumb_before, NULL, 0) == 0);
-
-  if (!TEST_CHECK(fs_write_file(item.derivatives[2].path, "", 0, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.original_path, "x", 1, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  TEST_CHECK(derivative_renderer_generate(&config, media, 1, frames, 1, false, &error_buffer) == 0);
-
-  struct FsMeta thumb_after;
-  struct FsMeta large_after;
-  struct FsMeta original_after;
-  TEST_CHECK(fs_stat_meta(item.derivatives[0].path, &thumb_after, NULL, 0) == 0);
-  TEST_CHECK(thumb_after.mtime_s == thumb_before.mtime_s &&
-             thumb_after.mtime_ns == thumb_before.mtime_ns);
-  TEST_CHECK(fs_stat_meta(item.derivatives[2].path, &large_after, NULL, 0) == 0);
-  TEST_CHECK(large_after.size_len > 0);
-  TEST_CHECK(fs_stat_meta(item.original_path, &original_after, NULL, 0) == 0);
-  TEST_CHECK(original_after.size_len == jpeg_len);
-
-cleanup:
-  string_buffer_free(&error_buffer);
-  free(jpeg);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  struct OsStat after;
+  TEST_CHECK(os_stat(os, item.derivatives[0].path, &after) == 0 &&
+             is_same_mtime(&after, &thumb_before));
+  TEST_CHECK(os_stat(os, item.derivatives[2].path, &after) == 0 && after.len > 0);
+  TEST_CHECK(os_stat(os, item.original_path, &after) == 0 && after.len == jpeg.len);
 }
 
 // When both image derivatives and the original are fresh, the renderer never decodes the source.
-// Replacing it with same-sized invalid bytes and backdating it therefore still succeeds.
+// Replacing it with same-sized invalid bytes, then making every output newer than it again,
+// therefore still succeeds.
 static void test_generate_avoids_decode_when_derivatives_fresh(void) {
-  char root_dir_template[] = "/tmp/fram-derivative-skip-decode.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct MediaItem item;
+  struct Str jpeg = {0};
+  struct GalleryConfig config;
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
+  struct MediaItem* media[] = {&item};
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
+  if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
     return;
   }
+  os_memory_write_bytes(os, item.source_path, jpeg);
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
 
-  struct Arena arena;
-  arena_init(&arena);
-  struct MediaItem item;
-  unsigned char* jpeg = NULL;
-  size_t jpeg_len = 0;
-  struct GalleryConfig config;
-  init_config(&config, 2, 2, 8, 8, 82);
-  struct MediaItem* media[] = {&item};
-  char* frames[] = {NULL};
-  struct StringBuffer error_buffer;
-  string_buffer_init(&error_buffer);
-  unsigned char* invalid = NULL;
-  if (init_item(&item, MEDIA_KIND_IMAGE, root_dir, "source.jpg", &arena) != 0) {
-    goto cleanup;
+  char* invalid = arena_new(&arena, jpeg.len, char);
+  os_memory_write_bytes(os, item.source_path, (struct Str){invalid, jpeg.len});
+  static const char* const outputs[] = {"public/s.jpg", "public/m.jpg", "public/l.jpg",
+                                        "public/original.bin"};
+  for (size_t i = 0; i < sizeof(outputs) / sizeof(outputs[0]); i++) {
+    os_memory_touch(os, outputs[i]);
   }
-  if (!TEST_CHECK(test_jpeg_encode(8, 4, &jpeg, &jpeg_len) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.source_path, jpeg, jpeg_len, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-
-  TEST_CHECK(derivative_renderer_generate(&config, media, 1, frames, 1, false, &error_buffer) == 0);
-
-  struct FsMeta thumb_meta;
-  TEST_CHECK(fs_stat_meta(item.derivatives[0].path, &thumb_meta, NULL, 0) == 0);
-  invalid = calloc(jpeg_len, 1);
-  if (!TEST_CHECK(invalid != NULL)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.source_path, invalid, jpeg_len, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  TEST_CHECK(set_older_mtime(item.source_path, &thumb_meta) == 0);
-  TEST_CHECK(derivative_renderer_generate(&config, media, 1, frames, 1, false, &error_buffer) == 0);
-  TEST_CHECK(error_buffer.len == 0);
-
-cleanup:
-  free(invalid);
-  string_buffer_free(&error_buffer);
-  free(jpeg);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
 }
 
-// Image sources apply EXIF before resizing. Orientation 6 turns a stored left/right color split
-// into a presented top/bottom split. Checking both regions distinguishes it from a distorted
-// resize.
+// Image sources apply EXIF before resizing.
 static void test_generate_applies_image_exif_orientation(void) {
-  char root_dir_template[] = "/tmp/fram-derivative-exif.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
-    return;
-  }
-
-  struct Arena arena;
-  arena_init(&arena);
-  struct MediaItem item;
-  unsigned char* jpeg = NULL;
-  size_t jpeg_len = 0;
-  struct GalleryConfig config;
-  init_config(&config, 2, 4, 16, 16, 95);
-  struct MediaItem* media[] = {&item};
-  char* frames[] = {NULL};
-  struct StringBuffer error_buffer;
-  string_buffer_init(&error_buffer);
-  unsigned char* output = NULL;
-  size_t output_len = 0;
-  struct Image decoded = {0};
-  if (init_item(&item, MEDIA_KIND_IMAGE, root_dir, "oriented.jpg", &arena) != 0) {
-    goto cleanup;
-  }
-  item.derivatives[0].width_px = 2;
-  item.derivatives[0].height_px = 4;
-  item.derivatives[2].width_px = 8;
-  item.derivatives[2].height_px = 16;
-  if (!TEST_CHECK(make_oriented_jpeg(&jpeg, &jpeg_len) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.source_path, jpeg, jpeg_len, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-
-  TEST_CHECK(derivative_renderer_generate(&config, media, 1, frames, 1, false, &error_buffer) == 0);
-
-  TEST_CHECK(fs_read_file(item.derivatives[2].path, TEST_FILE_LEN_MAX, &output, &output_len, NULL,
-                          0) == 0);
-  TEST_CHECK(image_decode(output, output_len, 0, 0, &decoded, NULL, 0) == 0);
-  if (TEST_CHECK(decoded.width_px == 8 && decoded.height_px == 16)) {
-    const size_t top = (2 * decoded.width_px + 4) * IMAGE_CHANNEL_COUNT;
-    const size_t bottom = (13 * decoded.width_px + 4) * IMAGE_CHANNEL_COUNT;
-    TEST_CHECK(decoded.pixels[top] > decoded.pixels[top + 2]);
-    TEST_CHECK(decoded.pixels[bottom + 2] > decoded.pixels[bottom]);
-  }
-
-cleanup:
-  image_free(&decoded);
-  free(output);
-  string_buffer_free(&error_buffer);
-  free(jpeg);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  check_generate_applies_orientation(0);
 }
 
-// A video uses its retained auto-rotated JPEG, copies the actual video original, and unlinks the
-// frame after the job. A failed frame decode still copies the original and preserves that first
-// decode diagnostic.
-static void test_generate_video_unlinks_frame_on_success_and_failure(void) {
-  char root_dir_template[] = "/tmp/fram-derivative-video.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
-    return;
-  }
-
-  struct Arena arena;
-  arena_init(&arena);
-  struct MediaItem item;
-  unsigned char* jpeg = NULL;
-  size_t jpeg_len = 0;
-  char* frame_path = path_join(root_dir, "frame.jpg", &arena);
-  struct GalleryConfig config;
-  init_config(&config, 2, 2, 8, 8, 82);
-  struct MediaItem* media[] = {&item};
-  char* frames[] = {frame_path};
-  struct StringBuffer error_buffer;
-  string_buffer_init(&error_buffer);
-  const char* decode_prefix = "failed to decode derivative source: ";
-  char frame_suffix[512];
-  int frame_suffix_len = -1;
-  unsigned char* original = NULL;
-  size_t original_len = 0;
-  if (init_item(&item, MEDIA_KIND_VIDEO, root_dir, "source.mp4", &arena) != 0) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.source_path, "video-bytes", strlen("video-bytes"), NULL, 0) ==
-                  0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(test_jpeg_encode(8, 4, &jpeg, &jpeg_len) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(frame_path, jpeg, jpeg_len, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-
-  TEST_CHECK(derivative_renderer_generate(&config, media, 1, frames, 1, false, &error_buffer) == 0);
-  TEST_CHECK(access(frame_path, F_OK) != 0);
-
-  // Force all derivatives stale, then hand the next job an invalid retained frame.
-  if (!TEST_CHECK(fs_write_file(item.derivatives[0].path, "", 0, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.derivatives[1].path, "", 0, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.derivatives[2].path, "", 0, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.original_path, "x", 1, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(frame_path, "bad", 3, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  string_buffer_free(&error_buffer);
-  string_buffer_init(&error_buffer);
-  TEST_CHECK(derivative_renderer_generate(&config, media, 1, frames, 1, false, &error_buffer) ==
-             -1);
-  TEST_CHECK(access(frame_path, F_OK) != 0);
-  // The decoder's own reason sits between the operation and the frame path, so only those two ends
-  // are pinned.
-  if (!TEST_CHECK(error_buffer.data != NULL)) {
-    goto cleanup;
-  }
-  TEST_CHECK(strncmp(error_buffer.data, decode_prefix, strlen(decode_prefix)) == 0);
-  frame_suffix_len = snprintf(frame_suffix, sizeof(frame_suffix), "('%s')", frame_path);
-  if (!TEST_CHECK(frame_suffix_len > 0 && (size_t)frame_suffix_len < sizeof(frame_suffix))) {
-    goto cleanup;
-  }
-  TEST_CHECK(
-      error_buffer.len >= (size_t)frame_suffix_len &&
-      strcmp(error_buffer.data + error_buffer.len - (size_t)frame_suffix_len, frame_suffix) == 0);
-  TEST_MSG("errors: %s", error_buffer.data != NULL ? error_buffer.data : "");
-
-  TEST_CHECK(
-      fs_read_file(item.original_path, TEST_FILE_LEN_MAX, &original, &original_len, NULL, 0) == 0);
-  TEST_CHECK(original_len == strlen("video-bytes"));
-  TEST_CHECK(memcmp(original, "video-bytes", original_len) == 0);
-
-cleanup:
-  free(original);
-  string_buffer_free(&error_buffer);
-  free(jpeg);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+// A source large enough to give its pages back is oriented as one that keeps them, so the
+// orientation is read before the source is given back.
+static void test_generate_orients_large_source_before_giving_it_back(void) {
+  check_generate_applies_orientation(JOB_SOURCE_DISCARD_LEN_MIN);
 }
 
-// A verbose phase prints one progress line per finished job, then closes the line. The lines are
-// written from worker threads under `stderr`'s lock, which is the only hand-written locking outside
-// the pool. This drives it with more workers than one so the lock is contended, and the `tsan` test
-// preset runs the same path under ThreadSanitizer.
+// A verbose phase prints one progress line per finished job, then closes the line. Each worker
+// prints its whole line in one `os_print` call under the lock `job.c` keeps for the progress line.
+// This drives it with more workers than one so the lock is contended, and the `tsan` test preset
+// runs the same path under ThreadSanitizer.
 static void test_verbose_prints_one_progress_line_per_job(void) {
-  char root_dir_template[] = "/tmp/fram-derivative-verbose.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
-    return;
-  }
-
   enum { ITEM_COUNT = 3 };
-  struct Arena arena;
-  arena_init(&arena);
-  unsigned char* jpeg = NULL;
-  size_t jpeg_len = 0;
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct Str jpeg = {0};
   struct MediaItem items[ITEM_COUNT];
   struct MediaItem* media[ITEM_COUNT];
-  char* frames[ITEM_COUNT] = {NULL};
+  struct VideoFrame frames[ITEM_COUNT] = {{0}};
   static const char* const names[ITEM_COUNT] = {"a.jpg", "b.jpg", "c.jpg"};
   struct GalleryConfig config;
-  init_config(&config, 2, 2, 8, 8, 82);
-  struct StringBuffer error_buffer;
-  string_buffer_init(&error_buffer);
-  char stderr_out[128];
-  int rc = -1;
-  size_t progress_len = 0;
-  if (!TEST_CHECK(test_jpeg_encode(8, 4, &jpeg, &jpeg_len) == 0)) {
-    goto cleanup;
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
+  struct Log log = test_log();
+  if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
+    return;
   }
-  for (size_t i = 0; i < ITEM_COUNT; i++) {
-    if (init_item(&items[i], MEDIA_KIND_IMAGE, root_dir, names[i], &arena) != 0) {
-      goto cleanup;
-    }
-    if (relocate_item_outputs(&items[i], root_dir, "public", names[i], &arena) != 0) {
-      goto cleanup;
-    }
-    if (!TEST_CHECK(fs_write_file(items[i].source_path, jpeg, jpeg_len, NULL, 0) == 0)) {
-      goto cleanup;
-    }
+  for (ptrdiff_t i = 0; i < ITEM_COUNT; i++) {
+    init_item(&items[i], MEDIA_KIND_IMAGE, names[i], &arena);
+    relocate_item_outputs(&items[i], "public", names[i], &arena);
+    os_memory_write_bytes(os, items[i].source_path, jpeg);
     media[i] = &items[i];
   }
 
-  rc = generate_capturing_stderr(&config, media, ITEM_COUNT, frames, 4, &error_buffer, stderr_out,
-                                 sizeof(stderr_out));
-
-  TEST_CHECK(rc == 0);
-  TEST_CHECK(error_buffer.len == 0);
+  TEST_CHECK(generate(&config, media, ITEM_COUNT, frames, 4, true, os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
   // Three jobs, so three progress lines, and one trailing newline closing the line before any later
   // status message. Workers finish in any order, so each count is asserted present once rather than
   // the whole text in sequence.
+  const struct Str printed = os_memory_printed(os, 2);
+  const char* text = str_cstr(printed, &arena);
   static const char* const progress_lines[] = {"\rgenerating derivatives 1/3",
                                                "\rgenerating derivatives 2/3",
                                                "\rgenerating derivatives 3/3"};
-  for (size_t i = 0; i < sizeof(progress_lines) / sizeof(progress_lines[0]); i++) {
-    const char* found = strstr(stderr_out, progress_lines[i]);
+  size_t progress_len = 0;
+  for (ptrdiff_t i = 0; i < (ptrdiff_t)(sizeof(progress_lines) / sizeof(progress_lines[0])); i++) {
+    const char* found = strstr(text, progress_lines[i]);
     TEST_CHECK(found != NULL && strstr(found + 1, progress_lines[i]) == NULL);
     progress_len += strlen(progress_lines[i]);
   }
-  TEST_CHECK(strlen(stderr_out) == progress_len + 1);
-  TEST_CHECK(stderr_out[progress_len] == '\n');
-  TEST_MSG("stderr: '%s'", stderr_out);
-
-cleanup:
-  string_buffer_free(&error_buffer);
-  free(jpeg);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(strlen(text) == progress_len + 1);
+  TEST_CHECK(text[progress_len] == '\n');
+  TEST_MSG("stderr: '%s'", text);
 }
 
 // Derivatives that share parent directories are written concurrently, each job creating the parents
@@ -691,362 +422,280 @@ cleanup:
 // `public/trip/deep`, so a job that took a sibling's `EEXIST` for a failure would drop its
 // derivatives. The `tsan` test preset runs the same path under ThreadSanitizer.
 static void test_writes_derivatives_sharing_parents_concurrently(void) {
-  char root_dir_template[] = "/tmp/fram-derivative-shared-parents.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
-    return;
-  }
-
   enum { ITEM_COUNT = 16 };
-  struct Arena arena;
-  arena_init(&arena);
-  unsigned char* jpeg = NULL;
-  size_t jpeg_len = 0;
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct Str jpeg = {0};
   struct MediaItem items[ITEM_COUNT];
   struct MediaItem* media[ITEM_COUNT];
-  char* frames[ITEM_COUNT] = {NULL};
+  struct VideoFrame frames[ITEM_COUNT] = {{0}};
   struct GalleryConfig config;
-  init_config(&config, 2, 2, 8, 8, 82);
-  struct StringBuffer error_buffer;
-  string_buffer_init(&error_buffer);
-  if (!TEST_CHECK(test_jpeg_encode(8, 4, &jpeg, &jpeg_len) == 0)) {
-    goto cleanup;
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
+  struct Log log = test_log();
+  if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
+    return;
   }
-  for (size_t i = 0; i < ITEM_COUNT; i++) {
+  for (ptrdiff_t i = 0; i < ITEM_COUNT; i++) {
     char name[64];
-    const int name_len = snprintf(name, sizeof(name), "photos/trip/deep/one-%02zu.jpg", i);
-    if (!TEST_CHECK(name_len > 0 && (size_t)name_len < sizeof(name))) {
-      goto cleanup;
-    }
+    (void)snprintf(name, sizeof(name), "trip/deep/one-%02td.jpg", i);
     char stem[32];
-    const int stem_len = snprintf(stem, sizeof(stem), "one-%02zu-jpg", i);
-    if (!TEST_CHECK(stem_len > 0 && (size_t)stem_len < sizeof(stem))) {
-      goto cleanup;
-    }
-    if (init_item(&items[i], MEDIA_KIND_IMAGE, root_dir, arena_strdup(&arena, name), &arena) != 0) {
-      goto cleanup;
-    }
-    if (relocate_item_outputs(&items[i], root_dir, "public/trip/deep", stem, &arena) != 0) {
-      goto cleanup;
-    }
-    if (!TEST_CHECK(fs_write_file(items[i].source_path, jpeg, jpeg_len, NULL, 0) == 0)) {
-      goto cleanup;
-    }
+    (void)snprintf(stem, sizeof(stem), "one-%02td-jpg", i);
+    init_item(&items[i], MEDIA_KIND_IMAGE, name, &arena);
+    relocate_item_outputs(&items[i], "public/trip/deep", stem, &arena);
+    os_memory_write_bytes(os, items[i].source_path, jpeg);
     media[i] = &items[i];
   }
 
-  TEST_CHECK(derivative_renderer_generate(&config, media, ITEM_COUNT, frames, 8, false,
-                                          &error_buffer) == 0);
-  TEST_CHECK(error_buffer.len == 0);
-  TEST_MSG("errors: %s", error_buffer.data != NULL ? error_buffer.data : "");
+  TEST_CHECK(generate(&config, media, ITEM_COUNT, frames, 8, false, os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
 
-  for (size_t i = 0; i < ITEM_COUNT; i++) {
-    size_t width = 0;
-    size_t height = 0;
-    TEST_CHECK(probe_file(items[i].derivatives[0].path, &width, &height) == 0);
+  for (ptrdiff_t i = 0; i < ITEM_COUNT; i++) {
+    ptrdiff_t width = 0;
+    ptrdiff_t height = 0;
+    TEST_CHECK(probe_file(items[i].derivatives[0].path, os, arena, &width, &height) == 0);
     TEST_CHECK(width == 2 && height == 2);
-    TEST_CHECK(probe_file(items[i].derivatives[1].path, &width, &height) == 0);
+    TEST_CHECK(probe_file(items[i].derivatives[1].path, os, arena, &width, &height) == 0);
     TEST_CHECK(width == 8 && height == 4);
-    TEST_CHECK(probe_file(items[i].derivatives[2].path, &width, &height) == 0);
+    TEST_CHECK(probe_file(items[i].derivatives[2].path, os, arena, &width, &height) == 0);
     TEST_CHECK(width == 8 && height == 4);
-    TEST_CHECK(access(items[i].original_path, F_OK) == 0);
-    TEST_MSG("item %zu", i);
+    struct OsStat original;
+    TEST_CHECK(os_stat(os, items[i].original_path, &original) == 0);
+    TEST_MSG("item %td", i);
   }
-
-cleanup:
-  string_buffer_free(&error_buffer);
-  free(jpeg);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
 }
 
-// The phase accepts an empty media set. `job_run` allocates error slots whose count is 0, for which
-// `calloc(0, ...)` may return `NULL`, and it must not report that as an allocation failure.
+// The phase accepts an empty media set, for which `job_run` allocates no error slot and starts no
+// job.
 static void test_accepts_empty_media_set(void) {
   struct GalleryConfig config;
-  init_config(&config, 2, 2, 8, 8, 82);
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[1] = {NULL};
-  char* frames[1] = {NULL};
-  struct StringBuffer error_buffer;
-  string_buffer_init(&error_buffer);
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
 
-  TEST_CHECK(derivative_renderer_generate(&config, media, 0, frames, 1, false, &error_buffer) == 0);
-  TEST_CHECK(error_buffer.len == 0);
-
-  string_buffer_free(&error_buffer);
+  TEST_CHECK(generate(&config, media, 0, frames, 1, false, os_memory(), &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
 }
 
-// A read reason survives in full when a long source path overflows the diagnostic, and the overflow
-// itself is marked rather than silent. The source and the fresh original are sparse, so the fixture
-// costs no disk.
-static void test_reports_read_reason_before_long_source_path(void) {
-  char root_dir_template[] = "/tmp/fram-derivative-long-source.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
+// A derivative whose path is a symlink is written through it, as every output is: the file it names
+// receives the JPEG.
+static void test_derivative_write_follows_symlink(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct MediaItem item;
+  struct Str jpeg = {0};
+  struct GalleryConfig config;
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
+  struct MediaItem* media[] = {&item};
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
+  if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
     return;
   }
+  os_memory_write_bytes(os, item.source_path, jpeg);
+  // An empty target is stale, so the build regenerates the derivative behind the link.
+  os_memory_write(os, "elsewhere/l.jpg", "");
+  os_memory_mkdir(os, "public");
+  os_memory_symlink(os, "../elsewhere/l.jpg", "public/l.jpg");
 
-  // Three 200-byte directories put the source path alone past `ERROR_MESSAGE_SIZE`, so the composed
-  // message cannot fit and is cut.
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
+  TEST_CHECK(probe_file(S("elsewhere/l.jpg"), os, arena, &width, &height) == 0);
+  TEST_CHECK(width == 8 && height == 4);
+}
+
+// A derivative whose write fails is reported. The next build regenerates it once the cause is gone,
+// because the failed write left no file: the in-memory host fails it before the first byte. A write
+// cut short part-way would leave a file the next build keeps as fresh, as `is_fresh_derivative`
+// documents. The outputs that did land are left alone.
+static void test_failed_derivative_write_is_regenerated(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct MediaItem item;
+  struct Str jpeg = {0};
+  struct GalleryConfig config;
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
+  struct MediaItem* media[] = {&item};
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
+  if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
+    return;
+  }
+  os_memory_write_bytes(os, item.source_path, jpeg);
+  os_memory_fail(os, OS_MEMORY_OP_WRITE_DATA, "public/l.jpg", ENOSPC);
+
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == -1);
+  char reason[ERROR_SYSTEM_MESSAGE_SIZE];
+  TEST_CHECK(test_log_is(&log, "failed to write derivative 'l': %s ('public/l.jpg')\n",
+                         error_system_message(reason, sizeof(reason), ENOSPC)));
+  struct OsStat thumb_before;
+  TEST_CHECK(os_stat(os, item.derivatives[0].path, &thumb_before) == 0);
+
+  os_memory_fail(os, OS_MEMORY_OP_WRITE_DATA, "public/l.jpg", 0);
+  log = test_log();
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
+  TEST_CHECK(probe_file(item.derivatives[2].path, os, arena, &width, &height) == 0);
+  TEST_CHECK(width == 8 && height == 4);
+  struct OsStat after;
+  TEST_CHECK(os_stat(os, item.derivatives[0].path, &after) == 0 &&
+             is_same_mtime(&after, &thumb_before));
+}
+
+// A read failure on a long source path is reported in full: the cause, the limit and the measured
+// length, and the whole path. The source and the fresh original are sparse, so the fixture costs no
+// memory.
+static void test_reports_read_failure_with_long_source_path(void) {
+  // Three 200-byte directories make the source path alone longer than 600 bytes.
   enum { SEGMENT_LEN = 200, DEPTH = 3 };
   char name[DEPTH * (SEGMENT_LEN + 1) + sizeof("source.jpg")];
-  size_t name_len = 0;
-  for (size_t i = 0; i < (size_t)DEPTH; i++) {
+  ptrdiff_t name_len = 0;
+  for (ptrdiff_t i = 0; i < DEPTH; i++) {
     memset(name + name_len, 'a', SEGMENT_LEN);
     name_len += SEGMENT_LEN;
     name[name_len++] = '/';
   }
   memcpy(name + name_len, "source.jpg", sizeof("source.jpg"));
-  _Static_assert(DEPTH * (SEGMENT_LEN + 1) > ERROR_MESSAGE_SIZE,
-                 "the source path must overflow the diagnostic");
 
-  struct Arena arena;
-  arena_init(&arena);
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
   struct MediaItem item;
-  const off_t source_len = (off_t)IMAGE_INPUT_LEN_MAX + 1;
+  const ptrdiff_t source_len = (ptrdiff_t)IMAGE_INPUT_LEN_MAX + 1;
   struct GalleryConfig config;
-  init_config(&config, 2, 2, 8, 8, 82);
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  char* frames[] = {NULL};
-  struct StringBuffer error_buffer;
-  string_buffer_init(&error_buffer);
-  char expected_head[160];
-  int expected_head_len = -1;
-  if (init_item(&item, MEDIA_KIND_IMAGE, root_dir, name, &arena) != 0) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.source_path, "", 0, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(truncate(item.source_path, source_len) == 0)) {
-    goto cleanup;
-  }
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  init_item(&item, MEDIA_KIND_IMAGE, name, &arena);
+  const char* source = str_cstr(item.source_path, &arena);
+  os_memory_write(os, source, "");
+  os_memory_truncate(os, source, source_len);
   // An original of the same size written after the source is fresh, so the read failure is the
   // job's only diagnostic.
-  if (!TEST_CHECK(fs_write_file(item.original_path, "", 0, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(truncate(item.original_path, source_len) == 0)) {
-    goto cleanup;
-  }
+  os_memory_write(os, "public/original.bin", "");
+  os_memory_truncate(os, "public/original.bin", source_len);
 
-  TEST_CHECK(derivative_renderer_generate(&config, media, 1, frames, 1, false, &error_buffer) ==
-             -1);
-  // The reason leads, so the clause naming the limit and the measured length is present even though
-  // the composed message is longer than the buffer. The prefix assertion verifies this ordering.
-  // The source path trails, so truncation removes the value rather than the reason.
-  expected_head_len =
-      snprintf(expected_head, sizeof(expected_head),
-               "failed to read derivative source: exceeds max file size (%d bytes) at %jd bytes ('",
-               IMAGE_INPUT_LEN_MAX, (intmax_t)source_len);
-  if (!TEST_CHECK(expected_head_len > 0 && (size_t)expected_head_len < sizeof(expected_head))) {
-    goto cleanup;
-  }
-  TEST_CHECK(error_buffer.data != NULL &&
-             strncmp(error_buffer.data, expected_head, (size_t)expected_head_len) == 0);
-  TEST_MSG("errors: %s", error_buffer.data != NULL ? error_buffer.data : "");
-
-  // And the cut is marked. Filling the buffer exactly is what proves this case still truncates at
-  // all: a reworded diagnostic that fits would leave the marker assertion below passing for the
-  // wrong reason, so the length is asserted first and fails loudly instead. Without the marker a
-  // cut path reads as a whole one and names a file that does not exist. The `...` is spelled out
-  // because `TRUNCATION_MARKER` is file-local to `core/error.c`. Changing it there must update this
-  // line.
-  TEST_CHECK(error_buffer.len == ERROR_MESSAGE_SIZE - 1);
-  TEST_CHECK(error_buffer.data != NULL && error_buffer.len >= 3 &&
-             strcmp(error_buffer.data + error_buffer.len - 3, "...") == 0);
-
-cleanup:
-  string_buffer_free(&error_buffer);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "failed to read derivative source: exceeds max file size (%d bytes) at "
+                         "%td bytes ('%.*s')\n",
+                         IMAGE_INPUT_LEN_MAX, source_len, STR_FMT(item.source_path)));
 }
 
 // A source that exists but cannot be read is reported with the system cause and the path it
 // happened on, rather than as a decode failure. The derivatives are stale, so the job reaches the
 // read, and the original is fresh, so the read failure is its only diagnostic.
 static void test_reports_unreadable_source(void) {
-  // Root bypasses the permission bits, so the source would read fine and the assertion below would
-  // fail for a reason that says nothing about the code under test.
-  if (geteuid() == 0) {
-    return;
-  }
-
-  char root_dir_template[] = "/tmp/fram-derivative-unreadable.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
-    return;
-  }
-
-  struct Arena arena;
-  arena_init(&arena);
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
   struct MediaItem item;
-  unsigned char* jpeg = NULL;
-  size_t jpeg_len = 0;
+  struct Str jpeg = {0};
   struct GalleryConfig config;
-  init_config(&config, 2, 2, 8, 8, 82);
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  char* frames[] = {NULL};
-  struct StringBuffer error_buffer;
-  string_buffer_init(&error_buffer);
-  int rc = 0;
-  char reason[FS_REASON_SIZE];
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = -1;
-  if (init_item(&item, MEDIA_KIND_IMAGE, root_dir, "source.jpg", &arena) != 0) {
-    goto cleanup;
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
+  if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
+    return;
   }
-  if (!TEST_CHECK(test_jpeg_encode(8, 4, &jpeg, &jpeg_len) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.source_path, jpeg, jpeg_len, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.original_path, jpeg, jpeg_len, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  TEST_CHECK(chmod(item.source_path, 0) == 0);
+  os_memory_write_bytes(os, item.source_path, jpeg);
+  os_memory_write_bytes(os, item.original_path, jpeg);
+  os_memory_fail(os, OS_MEMORY_OP_READ, "photos/source.jpg", EACCES);
 
-  rc = derivative_renderer_generate(&config, media, 1, frames, 1, false, &error_buffer);
-  // Restore the mode right after the call, so the unreadable source never outlives what it tests.
-  (void)chmod(item.source_path, 0644);
-
-  TEST_CHECK(rc == -1);
-  expected_len = snprintf(expected, sizeof(expected), "failed to read derivative source: %s ('%s')",
-                          error_system_message(reason, sizeof(reason), EACCES), item.source_path);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == -1);
   // Exact, not by substring: a substring check would also pass for this message with something
   // appended to it.
-  TEST_CHECK(error_buffer.data != NULL && strcmp(error_buffer.data, expected) == 0);
-  TEST_MSG("errors: %s", error_buffer.data != NULL ? error_buffer.data : "");
+  char reason[ERROR_SYSTEM_MESSAGE_SIZE];
+  TEST_CHECK(test_log_is(&log, "failed to read derivative source: %s ('photos/source.jpg')\n",
+                         error_system_message(reason, sizeof(reason), EACCES)));
+}
 
-cleanup:
-  string_buffer_free(&error_buffer);
-  free(jpeg);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+// A source that is a directory by the time its job runs is reported once, as a source that is not a
+// regular file, rather than once by the decode and again by the copy of the original.
+static void test_reports_directory_source_once(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct MediaItem item;
+  struct GalleryConfig config;
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
+  struct MediaItem* media[] = {&item};
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
+  os_memory_mkdir(os, "photos/source.jpg");
+
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == -1);
+  TEST_CHECK(test_log_is(
+      &log, "failed to inspect media source: not a regular file ('photos/source.jpg')\n"));
+  TEST_CHECK(os_memory_files(os, "public").count == 0);
 }
 
 // A derivative source larger than the decoder's `IMAGE_INPUT_LEN_MAX` input limit is rejected at
 // the read, from its size, naming the limit and the size, rather than loaded whole and turned away
-// by the decoder. The source and the fresh original are sparse, so the fixture costs no disk.
+// by the decoder. The source and the fresh original are sparse, so the fixture costs no memory.
 static void test_rejects_oversize_source(void) {
-  char root_dir_template[] = "/tmp/fram-derivative-oversize.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
-    return;
-  }
-
-  struct Arena arena;
-  arena_init(&arena);
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
   struct MediaItem item;
-  const off_t source_len = (off_t)IMAGE_INPUT_LEN_MAX + 1;
+  const ptrdiff_t source_len = (ptrdiff_t)IMAGE_INPUT_LEN_MAX + 1;
   struct GalleryConfig config;
-  init_config(&config, 2, 2, 8, 8, 82);
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  char* frames[] = {NULL};
-  struct StringBuffer error_buffer;
-  string_buffer_init(&error_buffer);
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = -1;
-  if (init_item(&item, MEDIA_KIND_IMAGE, root_dir, "source.jpg", &arena) != 0) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_write_file(item.source_path, "", 0, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(truncate(item.source_path, source_len) == 0)) {
-    goto cleanup;
-  }
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
+  os_memory_write(os, "photos/source.jpg", "");
+  os_memory_truncate(os, "photos/source.jpg", source_len);
   // An original of the same size written after the source is fresh, so the job reaches the
   // derivative read without first copying two gigabytes.
-  if (!TEST_CHECK(fs_write_file(item.original_path, "", 0, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(truncate(item.original_path, source_len) == 0)) {
-    goto cleanup;
-  }
+  os_memory_write(os, "public/original.bin", "");
+  os_memory_truncate(os, "public/original.bin", source_len);
 
-  TEST_CHECK(derivative_renderer_generate(&config, media, 1, frames, 1, false, &error_buffer) ==
-             -1);
-  expected_len = snprintf(expected, sizeof(expected),
-                          "failed to read derivative source: exceeds max file size (%d bytes) at "
-                          "%jd bytes ('%s')",
-                          IMAGE_INPUT_LEN_MAX, (intmax_t)source_len, item.source_path);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(error_buffer.data != NULL && strcmp(error_buffer.data, expected) == 0);
-  TEST_MSG("errors: %s", error_buffer.data != NULL ? error_buffer.data : "");
-
-cleanup:
-  string_buffer_free(&error_buffer);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "failed to read derivative source: exceeds max file size (%d bytes) at "
+                         "%td bytes ('photos/source.jpg')\n",
+                         IMAGE_INPUT_LEN_MAX, source_len));
 }
 
-// Two failing sources append one diagnostic line each, separated by exactly one newline, with none
-// leading or trailing the buffer. That separator placement is what the "one per line" contract in
-// `derivative_renderer.h` means, and a single-source failure cannot observe it at all.
+// Two failing sources append one line each to the log, in media order, each ending in exactly one
+// newline. That is what `job_run`'s merge of the jobs' logs means at this module's boundary, and a
+// single-source failure cannot observe the order at all.
 // `test_reports_one_line_per_failing_media_item` in `src/app/test_cmd_build.c` pins the same
 // separator for failures in the probe phase, which stops a build before this phase runs. This one
 // pins it at the module boundary, where the contract is documented.
 static void test_appends_one_error_line_per_failing_source(void) {
-  char root_dir_template[] = "/tmp/fram-derivative-error-lines.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
-    return;
-  }
-
   // Both sources are not JPEG data, so each fails its decode with its own message.
-  struct Arena arena;
-  arena_init(&arena);
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
   struct MediaItem items[2];
   static const char* const names[] = {"a.jpg", "b.jpg"};
   struct GalleryConfig config;
-  init_config(&config, 2, 2, 8, 8, 82);
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&items[0], &items[1]};
-  char* frames[] = {NULL, NULL};
-  struct StringBuffer error_buffer;
-  string_buffer_init(&error_buffer);
-  char expected[2 * ERROR_MESSAGE_SIZE];
-  int expected_len = -1;
-  for (size_t i = 0; i < 2; i++) {
-    if (init_item(&items[i], MEDIA_KIND_IMAGE, root_dir, names[i], &arena) != 0) {
-      goto cleanup;
-    }
-    if (relocate_item_outputs(&items[i], root_dir, "public", names[i], &arena) != 0) {
-      goto cleanup;
-    }
-    if (!TEST_CHECK(fs_write_file(items[i].source_path, "not a JPEG\n", strlen("not a JPEG\n"),
-                                  NULL, 0) == 0)) {
-      goto cleanup;
-    }
+  struct VideoFrame frames[2] = {{0}};
+  struct Log log = test_log();
+  for (ptrdiff_t i = 0; i < 2; i++) {
+    init_item(&items[i], MEDIA_KIND_IMAGE, names[i], &arena);
+    relocate_item_outputs(&items[i], "public", names[i], &arena);
+    os_memory_write_bytes(os, items[i].source_path, S("not a JPEG\n"));
   }
 
-  TEST_CHECK(derivative_renderer_generate(&config, media, 2, frames, 2, false, &error_buffer) ==
-             -1);
-  // Compared whole, with the separator in the middle: a dropped separator, a lost line, or a
-  // leading or trailing newline each change these bytes.
-  expected_len =
-      snprintf(expected, sizeof(expected),
-               "failed to decode derivative source: failed to probe JPEG: unknown image type "
-               "('%s')\n"
-               "failed to decode derivative source: failed to probe JPEG: unknown image type "
-               "('%s')",
-               items[0].source_path, items[1].source_path);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(error_buffer.data != NULL && strcmp(error_buffer.data, expected) == 0);
-  TEST_MSG("errors: %s", error_buffer.data != NULL ? error_buffer.data : "");
-
-cleanup:
-  string_buffer_free(&error_buffer);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(generate(&config, media, 2, frames, 2, false, os, &log) == -1);
+  // Compared whole: a dropped newline, a lost line, or the wrong order each change these bytes.
+  TEST_CHECK(test_log_is(&log,
+                         "failed to decode derivative source: failed to probe JPEG: unknown image "
+                         "type ('photos/a.jpg')\n"
+                         "failed to decode derivative source: failed to probe JPEG: unknown image "
+                         "type ('photos/b.jpg')\n"));
+  TEST_CHECK(log.errors == 2);
 }
 
 TEST_LIST = {
@@ -1055,15 +704,17 @@ TEST_LIST = {
     {"generate avoids decode when derivatives fresh",
      test_generate_avoids_decode_when_derivatives_fresh},
     {"generate applies image exif orientation", test_generate_applies_image_exif_orientation},
-    {"generate video unlinks frame on success and failure",
-     test_generate_video_unlinks_frame_on_success_and_failure},
+    {"generate orients large source before giving it back",
+     test_generate_orients_large_source_before_giving_it_back},
     {"verbose prints one progress line per job", test_verbose_prints_one_progress_line_per_job},
     {"writes derivatives sharing parents concurrently",
      test_writes_derivatives_sharing_parents_concurrently},
     {"accepts empty media set", test_accepts_empty_media_set},
-    {"reports read reason before long source path",
-     test_reports_read_reason_before_long_source_path},
+    {"derivative write follows symlink", test_derivative_write_follows_symlink},
+    {"failed derivative write is regenerated", test_failed_derivative_write_is_regenerated},
+    {"reports read failure with long source path", test_reports_read_failure_with_long_source_path},
     {"reports unreadable source", test_reports_unreadable_source},
+    {"reports directory source once", test_reports_directory_source_once},
     {"rejects oversize source", test_rejects_oversize_source},
     {"appends one error line per failing source", test_appends_one_error_line_per_failing_source},
     {NULL, NULL},

@@ -1,207 +1,167 @@
-#define _DARWIN_C_SOURCE
-#define _DEFAULT_SOURCE
-
 #include <acutest.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "build/manifest_builder.h"
-#include "core/error.h"
 #include "core/path.h"
 #include "core/path_list.h"
 #include "domain/album.h"
 #include "domain/gallery_config.h"
 #include "domain/manifest.h"
 #include "domain/media_item.h"
-#include "runtime/fs.h"
+#include "os_memory.h"
 #include "shared/arena.h"
+#include "shared/buf.h"
+#include "shared/log.h"
+#include "shared/str.h"
 #include "test_support.h"
 
-/**
- * @brief Creates a fixture holding `fram.toml` and `templates/album.html`, and points a
- *        configuration at it.
- *
- * `input_dir` is `photos`, `output_dir` is `public`, `templates_dir` is `templates`, and
- * `static_dir` is `static`, each below `root_dir`. No aggregate template is configured. Only the
- * two files exist, so no source, static file, or output is present.
- *
- * @param root_dir       Writable `mkdtemp` template. Receives the created directory path.
- * @param arena          Arena that owns the joined paths. Must not be `NULL`.
- * @param gallery_config Configuration to initialize. The caller releases it with
- *                       `gallery_config_free`. Must not be `NULL`.
- * @return The path of the fixture's `fram.toml`, owned by `arena`, or `NULL` after recording a
- *         test-plumbing failure, with the fixture removed and `gallery_config` released.
- */
-static char* init_manifest_fixture(char* root_dir,
-                                   struct Arena* arena,
-                                   struct GalleryConfig* gallery_config) {
-  gallery_config_init(gallery_config);
-  if (init_fixture_dir(root_dir) == NULL) {
-    return NULL;
-  }
-  char* config_path = path_join(root_dir, "fram.toml", arena);
-  gallery_config->input_dir = path_join(root_dir, "photos", arena);
-  gallery_config->output_dir = path_join(root_dir, "public", arena);
-  gallery_config->templates_dir = path_join(root_dir, "templates", arena);
-  gallery_config->static_dir = path_join(root_dir, "static", arena);
-  if (!TEST_CHECK(write_fixture_file(root_dir, "fram.toml", "title = 'x'\n") == 0)) {
-    goto fail;
-  }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "templates/album.html", "album") == 0)) {
-    goto fail;
-  }
-  if (!TEST_CHECK(config_path != NULL && gallery_config->input_dir != NULL &&
-                  gallery_config->output_dir != NULL && gallery_config->templates_dir != NULL &&
-                  gallery_config->static_dir != NULL)) {
-    goto fail;
-  }
-  return config_path;
+// Every test here runs against the in-memory host. The identity checks see what they would see on
+// disk: two spellings of one directory, a symlink and its target, and two hard links to one file
+// share an identity, and `..` resolves against the directory actually reached.
 
-fail:
-  gallery_config_free(gallery_config);
-  remove_fixture_tree(root_dir);
-  return NULL;
+/** Path of the fixture's configuration file. */
+#define CONFIG_PATH S("gallery/fram.toml")
+
+/**
+ * @brief Creates a host holding `gallery/fram.toml` and `gallery/templates/album.html`, and points
+ *        a configuration at it.
+ *
+ * `input_dir` is `gallery/photos`, `output_dir` is `gallery/public`, `templates_dir` is
+ * `gallery/templates`, and `static_dir` is `gallery/static`. No aggregate template is configured.
+ * Only the two files exist, so no source, static file, or output is present.
+ *
+ * @param gallery_config Configuration to initialize. Must not be `NULL`.
+ * @return The host.
+ */
+static struct Os* init_manifest_fixture(struct GalleryConfig* gallery_config) {
+  gallery_config_init(gallery_config);
+  gallery_config->input_dir = S("gallery/photos");
+  gallery_config->output_dir = S("gallery/public");
+  gallery_config->templates_dir = S("gallery/templates");
+  gallery_config->static_dir = S("gallery/static");
+  struct Os* os = os_memory();
+  os_memory_write(os, "gallery/fram.toml", "title = 'x'\n");
+  os_memory_write(os, "gallery/templates/album.html", "album");
+  return os;
+}
+
+/**
+ * @brief Populates a manifest from albums, as the build does.
+ *
+ * The manifest's data goes in a reservation of its own, never in the log's arena, so a failure the
+ * log records cannot grow over the paths the populate is still using.
+ *
+ * @param manifest       Manifest that receives the outputs. Must not be `NULL`.
+ * @param gallery_config Configuration to populate from. Must not be `NULL`.
+ * @param source_paths   Claimed media sources, or `NULL` for none.
+ * @param static_paths   Enumerated static files, or `NULL` for none.
+ * @param albums         Array of `album_count` albums. Must not be `NULL`.
+ * @param album_count    Number of albums.
+ * @param os             Host the fixture is on. Must not be `NULL`.
+ * @param log            Log that receives every error. Must not be `NULL`.
+ * @return The result of `manifest_builder_populate`.
+ */
+static int populate(struct Manifest* manifest,
+                    const struct GalleryConfig* gallery_config,
+                    const struct PathList* source_paths,
+                    const struct PathList* static_paths,
+                    const struct Album* const* albums,
+                    ptrdiff_t album_count,
+                    struct Os* os,
+                    struct Log* log) {
+  static const struct PathList empty = {0};
+  struct Arena perm = test_arena();
+  return manifest_builder_populate(manifest, gallery_config, CONFIG_PATH,
+                                   source_paths != NULL ? source_paths : &empty,
+                                   static_paths != NULL ? static_paths : &empty, albums,
+                                   album_count, os, &perm, test_arena(), log);
 }
 
 /**
  * @brief Populates a manifest with one root album page and checks the input-root rejection.
  *
- * @param config      Configuration whose roots the page is checked against. Must not be `NULL`.
- * @param config_path Path of the fixture's `fram.toml`. Must not be `NULL`.
- * @param output_path Output path of the root album page, joined onto `config->output_dir`. Must not
- *                    be `NULL`.
- * @param root_key    Config key of the root the diagnostic must name. Must not be `NULL`.
+ * @param gallery_config Configuration whose roots the page is checked against. Must not be `NULL`.
+ * @param output_path    Terminated output path of the root album page. Must not be `NULL`.
+ * @param root_key       Config key of the root the diagnostic must name. Must not be `NULL`.
+ * @param os             Host the fixture is on. Must not be `NULL`.
  */
-static void check_rejects_output_in_root(const struct GalleryConfig* config,
-                                         const char* config_path,
+static void check_rejects_output_in_root(const struct GalleryConfig* gallery_config,
                                          const char* output_path,
-                                         const char* root_key) {
-  struct Album album = {.source_dir = "", .output_path = output_path};
+                                         const char* root_key,
+                                         struct Os* os) {
+  struct Album album = {.source_dir = S(""), .output_path = str_from_cstr(output_path)};
   const struct Album* albums[] = {&album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  TEST_CHECK(manifest_builder_populate(&manifest, config, config_path, &empty, &empty, albums, 1,
-                                       err, sizeof(err)) == -1);
-  char expected[ERROR_MESSAGE_SIZE];
-  const int expected_len =
-      snprintf(expected, sizeof(expected), "output path would write inside '%s' for '%s': '%s'",
-               root_key, config->input_dir, output_path);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-  TEST_MSG("actual: '%s'", err);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
+  TEST_CHECK(populate(&manifest, gallery_config, NULL, NULL, albums, 1, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log, "output path would write inside '%s' for '%.*s': '%s'\n", root_key,
+                         STR_FMT(gallery_config->input_dir), output_path));
 }
 
 /**
- * @brief Checks that `manifest_builder_check_output_dir` rejects `config->output_dir` and creates
- *        nothing.
+ * @brief Checks that `manifest_builder_check_output_dir` rejects `gallery_config->output_dir` and
+ *        creates nothing.
  *
- * @param config   Configuration whose `output_dir` lies at or below an input root. Must not be
- *                 `NULL`.
- * @param root_key Config key of the root the diagnostic must name. Must not be `NULL`.
+ * @param gallery_config Configuration whose `output_dir` lies at or below an input root. Must not
+ *                       be `NULL`.
+ * @param root_key       Config key of the root the diagnostic must name. Must not be `NULL`.
+ * @param os             Host the fixture is on. Must not be `NULL`.
  */
-static void check_rejects_output_dir_in_root(const struct GalleryConfig* config,
-                                             const char* root_key) {
-  const bool had_output_dir = access(config->output_dir, F_OK) == 0;
-  char err[ERROR_MESSAGE_SIZE] = "";
-  TEST_CHECK(manifest_builder_check_output_dir(config, err, sizeof(err)) == -1);
-  char expected[ERROR_MESSAGE_SIZE];
-  const int expected_len =
-      snprintf(expected, sizeof(expected), "output directory would write inside '%s': '%s'",
-               root_key, config->output_dir);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    return;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-  TEST_MSG("actual: '%s'", err);
-  TEST_CHECK((access(config->output_dir, F_OK) == 0) == had_output_dir);
+static void check_rejects_output_dir_in_root(const struct GalleryConfig* gallery_config,
+                                             const char* root_key,
+                                             struct Os* os) {
+  struct Arena arena = test_arena();
+  const char* output_dir = str_cstr(gallery_config->output_dir, &arena);
+  const bool had_output_dir = os_memory_has_path(os, output_dir);
+  struct Log log = test_log();
+  TEST_CHECK(manifest_builder_check_output_dir(gallery_config, os, test_arena(), &log) == -1);
+  TEST_CHECK(test_log_is(&log, "output directory would write inside '%s': '%.*s'\n", root_key,
+                         STR_FMT(gallery_config->output_dir)));
+  TEST_CHECK(os_memory_has_path(os, output_dir) == had_output_dir);
+  TEST_MSG("output_dir: '%s'", output_dir);
 }
 
 // Every album, derivative, original, aggregate, and static file output is registered exactly once.
 static void test_registers_complete_output_set(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* source_path = path_join(config.input_dir, "x.jpg", &arena);
-  char* static_path = path_join(config.static_dir, "a.txt", &arena);
-  char* album_output = path_join(config.output_dir, "index.html", &arena);
-  char* small = path_join(config.output_dir, "_fram/r/s/x.jpg", &arena);
-  char* medium = path_join(config.output_dir, "_fram/r/m/x.jpg", &arena);
-  char* large = path_join(config.output_dir, "_fram/r/l/x.jpg", &arena);
-  char* original = path_join(config.output_dir, "_fram/originals/x.jpg", &arena);
-  static const char* const aggregates[] = {"map.xml"};
-  config.aggregate_templates = aggregates;
-  config.aggregate_template_count = 1;
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/photos/x.jpg", "source");
+  os_memory_write(os, "gallery/templates/map.xml", "map");
+  os_memory_write(os, "gallery/static/a.txt", "static");
+  static const struct Str aggregates[] = {STR_INIT("map.xml")};
+  gallery_config.aggregate_templates = aggregates;
+  gallery_config.aggregate_template_count = 1;
   struct MediaDerivative derivatives[] = {
-      {.name = "s", .path = small},
-      {.name = "m", .path = medium},
-      {.name = "l", .path = large},
+      {.name = S("s"), .path = S("gallery/public/_fram/r/s/x.jpg")},
+      {.name = S("m"), .path = S("gallery/public/_fram/r/m/x.jpg")},
+      {.name = S("l"), .path = S("gallery/public/_fram/r/l/x.jpg")},
   };
-  struct MediaItem media = {.source_path = source_path,
+  struct MediaItem media = {.source_path = S("gallery/photos/x.jpg"),
                             .derivatives = derivatives,
                             .derivative_count = 3,
-                            .original_path = original};
+                            .original_path = S("gallery/public/_fram/originals/x.jpg")};
   struct MediaItem* media_items[] = {&media};
-  struct Album album = {
-      .source_dir = "", .output_path = album_output, .media = media_items, .media_count = 1};
+  struct Album album = {.source_dir = S(""),
+                        .output_path = S("gallery/public/index.html"),
+                        .media = media_items,
+                        .media_count = 1};
   const struct Album* albums[] = {&album};
-  struct PathList sources;
-  struct PathList static_paths;
-  path_list_init(&sources);
-  path_list_init(&static_paths);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  if (!TEST_CHECK(write_fixture_file(root_dir, "photos/x.jpg", "source") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "templates/map.xml", "map") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "static/a.txt", "static") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(source_path != NULL && static_path != NULL && album_output != NULL &&
-                  small != NULL && medium != NULL && large != NULL && original != NULL)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(path_list_push(&sources, source_path) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(path_list_push(&static_paths, static_path) == 0)) {
-    goto cleanup;
-  }
+  struct Arena arena = test_arena();
+  struct PathList sources = {0};
+  struct PathList static_paths = {0};
+  path_list_push(&sources, S("gallery/photos/x.jpg"), &arena);
+  path_list_push(&static_paths, S("gallery/static/a.txt"), &arena);
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &sources, &static_paths,
-                                       albums, 1, err, sizeof(err)) == 0);
-  TEST_CHECK(err[0] == '\0');
-  TEST_MSG("actual: '%s'", err);
+  TEST_CHECK(populate(&manifest, &gallery_config, &sources, &static_paths, albums, 1, os, &log) ==
+             0);
+  TEST_CHECK(test_log_is_empty(&log));
   TEST_CHECK(manifest.count == 7);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&sources);
-  path_list_free(&static_paths);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
 }
 
 // A `templates_dir` that does not exist holds no file an output could overwrite, so it claims
@@ -209,201 +169,104 @@ cleanup:
 // manifest runs, as `test_reports_absent_templates_dir` in `src/app/test_cmd_build.c` pins, so this
 // is the module's own contract rather than a path the build reaches.
 static void test_accepts_missing_templates_dir(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* album_output = path_join(config.output_dir, "index.html", &arena);
-  char* templates_dir = path_join(root_dir, "missing", &arena);
-  struct Album album = {.source_dir = "", .output_path = album_output};
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  gallery_config.templates_dir = S("gallery/missing");
+  struct Album album = {.source_dir = S(""), .output_path = S("gallery/public/index.html")};
   const struct Album* albums[] = {&album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  if (!TEST_CHECK(album_output != NULL && templates_dir != NULL)) {
-    goto cleanup;
-  }
-  config.templates_dir = templates_dir;
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 1,
-                                       err, sizeof(err)) == 0);
-  TEST_CHECK(err[0] == '\0');
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 1, os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
   TEST_CHECK(manifest.count == 1);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
 }
 
 // An output beside an input root, in a directory whose name only starts with the root's name, is
 // accepted, because the root check compares whole directories rather than path prefixes.
 static void test_accepts_output_beside_input_roots(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  config.output_dir = root_dir;
-  char* photos_output = path_join(root_dir, "photosx/index.html", &arena);
-  char* templates_output = path_join(root_dir, "templatesx/index.html", &arena);
-  char* static_output = path_join(root_dir, "staticx/index.html", &arena);
-  struct Album photos_album = {.source_dir = "a", .output_path = photos_output};
-  struct Album templates_album = {.source_dir = "b", .output_path = templates_output};
-  struct Album static_album = {.source_dir = "c", .output_path = static_output};
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/photos/x.jpg", "source");
+  os_memory_write(os, "gallery/static/a.css", "static");
+  os_memory_write(os, "gallery/photosx/old.html", "old");
+  gallery_config.output_dir = S("gallery");
+  struct Album photos_album = {.source_dir = S("a"),
+                               .output_path = S("gallery/photosx/index.html")};
+  struct Album templates_album = {.source_dir = S("b"),
+                                  .output_path = S("gallery/templatesx/index.html")};
+  struct Album static_album = {.source_dir = S("c"),
+                               .output_path = S("gallery/staticx/index.html")};
   const struct Album* albums[] = {&photos_album, &templates_album, &static_album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  if (!TEST_CHECK(write_fixture_file(root_dir, "photos/x.jpg", "source") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "static/a.css", "static") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "photosx/old.html", "old") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(photos_output != NULL && templates_output != NULL && static_output != NULL)) {
-    goto cleanup;
-  }
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 3,
-                                       err, sizeof(err)) == 0);
-  TEST_CHECK(err[0] == '\0');
-  TEST_MSG("actual: '%s'", err);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 3, os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
 }
 
 // An `output_dir` outside every input root passes the early check whether or not it exists yet.
 // That includes a directory whose name only starts with a root's name, and one that holds the roots
 // rather than lying inside them, which is the `output_dir = "."` layout.
 static void test_check_output_dir_accepts_dir_outside_input_roots(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  if (init_manifest_fixture(root_dir, &arena, &config) == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  const char* const output_dirs[] = {
-      root_dir,
-      path_join(root_dir, "public", &arena),
-      path_join(root_dir, "photosx/new", &arena),
-      path_join(root_dir, "photos/../public/new", &arena),
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/photos/x.jpg", "source");
+  os_memory_write(os, "gallery/static/a.css", "static");
+  static const struct Str output_dirs[] = {
+      STR_INIT("gallery"),
+      STR_INIT("gallery/public"),
+      STR_INIT("gallery/photosx/new"),
+      STR_INIT("gallery/photos/../public/new"),
   };
-  if (!TEST_CHECK(write_fixture_file(root_dir, "photos/x.jpg", "source") == 0)) {
-    goto cleanup;
+  for (ptrdiff_t i = 0; i < (ptrdiff_t)(sizeof(output_dirs) / sizeof(output_dirs[0])); i++) {
+    gallery_config.output_dir = output_dirs[i];
+    struct Log log = test_log();
+    TEST_CHECK(manifest_builder_check_output_dir(&gallery_config, os, test_arena(), &log) == 0);
+    TEST_CHECK(test_log_is_empty(&log));
+    TEST_MSG("output_dir: '%.*s'", STR_FMT(output_dirs[i]));
   }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "static/a.css", "static") == 0)) {
-    goto cleanup;
-  }
-  for (size_t i = 0; i < sizeof(output_dirs) / sizeof(output_dirs[0]); i++) {
-    if (!TEST_CHECK(output_dirs[i] != NULL)) {
-      goto cleanup;
-    }
-    config.output_dir = output_dirs[i];
-    char err[ERROR_MESSAGE_SIZE] = "";
-    TEST_CHECK(manifest_builder_check_output_dir(&config, err, sizeof(err)) == 0);
-    TEST_MSG("output_dir: '%s', actual: '%s'", output_dirs[i], err);
-  }
-
-cleanup:
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
-}
-
-// A configured template's output path is its name joined below `output_dir`, nested directories
-// included. `site_writer` writes to this same path, so it is the one the manifest checked.
-static void test_derive_template_output_joins_output_dir(void) {
-  struct Arena arena;
-  arena_init(&arena);
-  const char* top = manifest_builder_derive_template_output("public", "index.html", &arena);
-  const char* nested = manifest_builder_derive_template_output("public", "feeds/map.xml", &arena);
-  TEST_ASSERT(top != NULL && nested != NULL);
-  TEST_CHECK(strcmp(top, "public/index.html") == 0);
-  TEST_CHECK(strcmp(nested, "public/feeds/map.xml") == 0);
-  arena_free(&arena);
-}
-
-// A static file's output path keeps its path below `static_dir`, rooted directly at `output_dir`.
-// `site_writer` copies to this same path, so it is the one the manifest checked.
-static void test_derive_static_output_joins_output_dir(void) {
-  struct Arena arena;
-  arena_init(&arena);
-  const char* output = manifest_builder_derive_static_output("public", "icons/a.svg", &arena);
-  TEST_ASSERT(output != NULL);
-  TEST_CHECK(strcmp(output, "public/icons/a.svg") == 0);
-  arena_free(&arena);
 }
 
 // Two albums claiming the same output path are rejected with a diagnostic naming the path.
 static void test_rejects_duplicate(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* output_path = path_join(config.output_dir, "trip/index.html", &arena);
-  char* first_label = path_join(config.input_dir, "a", &arena);
-  char* second_label = path_join(config.input_dir, "b", &arena);
-  struct Album first_album = {.source_dir = "a", .output_path = output_path};
-  struct Album second_album = {.source_dir = "b", .output_path = output_path};
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  struct Album first_album = {.source_dir = S("a"),
+                              .output_path = S("gallery/public/trip/index.html")};
+  struct Album second_album = {.source_dir = S("b"),
+                               .output_path = S("gallery/public/trip/index.html")};
   const struct Album* albums[] = {&first_album, &second_album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(output_path != NULL && first_label != NULL && second_label != NULL)) {
-    goto cleanup;
-  }
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 2,
-                                       err, sizeof(err)) == -1);
-  expected_len =
-      snprintf(expected, sizeof(expected), "duplicate output path for '%s' and '%s': '%s'",
-               first_label, second_label, output_path);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 2, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "duplicate output path for 'gallery/photos/a' and 'gallery/photos/b': "
+                         "'gallery/public/trip/index.html'\n"));
+}
 
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+// Every collision is reported in one run, in registration order, rather than only the first. A
+// rejected claim is not recorded, so the manifest keeps one path from each pair.
+static void test_reports_every_collision(void) {
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  struct Album album_a = {.source_dir = S("a"), .output_path = S("gallery/public/one/index.html")};
+  struct Album album_b = {.source_dir = S("b"), .output_path = S("gallery/public/one/index.html")};
+  struct Album album_c = {.source_dir = S("c"), .output_path = S("gallery/public/two/index.html")};
+  struct Album album_d = {.source_dir = S("d"), .output_path = S("gallery/public/two/index.html")};
+  const struct Album* albums[] = {&album_a, &album_b, &album_c, &album_d};
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
+
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 4, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "duplicate output path for 'gallery/photos/a' and 'gallery/photos/b': "
+                         "'gallery/public/one/index.html'\n"
+                         "duplicate output path for 'gallery/photos/c' and 'gallery/photos/d': "
+                         "'gallery/public/two/index.html'\n"));
+  TEST_CHECK(log.errors == 2);
+  TEST_CHECK(manifest.count == 2);
 }
 
 // Two albums whose page paths differ only in ASCII case claim one file on a case-insensitive
@@ -411,200 +274,107 @@ cleanup:
 // They are rejected as a duplicate on every platform, so a gallery that builds on Linux does not
 // break on macOS. The trailing path is the second claim's own spelling.
 static void test_rejects_case_folded_duplicate(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* first_output = path_join(config.output_dir, "Trip/index.html", &arena);
-  char* second_output = path_join(config.output_dir, "trip/index.html", &arena);
-  char* first_label = path_join(config.input_dir, "a", &arena);
-  char* second_label = path_join(config.input_dir, "b", &arena);
-  struct Album first_album = {.source_dir = "a", .output_path = first_output};
-  struct Album second_album = {.source_dir = "b", .output_path = second_output};
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  struct Album first_album = {.source_dir = S("a"),
+                              .output_path = S("gallery/public/Trip/index.html")};
+  struct Album second_album = {.source_dir = S("b"),
+                               .output_path = S("gallery/public/trip/index.html")};
   const struct Album* albums[] = {&first_album, &second_album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(first_output != NULL && second_output != NULL && first_label != NULL &&
-                  second_label != NULL)) {
-    goto cleanup;
-  }
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 2,
-                                       err, sizeof(err)) == -1);
-  expected_len =
-      snprintf(expected, sizeof(expected), "duplicate output path for '%s' and '%s': '%s'",
-               first_label, second_label, second_output);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 2, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "duplicate output path for 'gallery/photos/a' and 'gallery/photos/b': "
+                         "'gallery/public/trip/index.html'\n"));
 }
 
 // Two albums whose page paths collide as a file and a directory, where one is a `/`-delimited
 // prefix of the other, are rejected even though neither is a duplicate. The two producers lead the
-// message ahead of the one unbounded path. The ancestor path is not repeated because it is a prefix
-// of the path that is printed.
+// message and the path trails. The ancestor path is not repeated because it is a prefix of the path
+// that is printed.
 static void test_rejects_prefix_collision(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* file_output = path_join(config.output_dir, "trip", &arena);
-  char* nested_output = path_join(config.output_dir, "trip/index.html", &arena);
-  char* file_label = path_join(config.input_dir, "a", &arena);
-  char* nested_label = path_join(config.input_dir, "b", &arena);
-  struct Album file_album = {.source_dir = "a", .output_path = file_output};
-  struct Album nested_album = {.source_dir = "b", .output_path = nested_output};
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  struct Album file_album = {.source_dir = S("a"), .output_path = S("gallery/public/trip")};
+  struct Album nested_album = {.source_dir = S("b"),
+                               .output_path = S("gallery/public/trip/index.html")};
   const struct Album* albums[] = {&file_album, &nested_album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(file_output != NULL && nested_output != NULL && file_label != NULL &&
-                  nested_label != NULL)) {
-    goto cleanup;
-  }
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 2,
-                                       err, sizeof(err)) == -1);
-  expected_len = snprintf(expected, sizeof(expected),
-                          "output path for '%s' nests under output path for '%s': '%s'",
-                          nested_label, file_label, nested_output);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 2, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "output path for 'gallery/photos/b' nests under output path for "
+                         "'gallery/photos/a': 'gallery/public/trip/index.html'\n"));
+}
 
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+// Every output that nests under another is reported in one run, not only the first.
+static void test_rejects_every_prefix_collision(void) {
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  static const char* const names[][2] = {{"a", "gallery/public/trip"},
+                                         {"b", "gallery/public/trip/index.html"},
+                                         {"c", "gallery/public/walk"},
+                                         {"d", "gallery/public/walk/index.html"}};
+  struct Album albums[4];
+  const struct Album* album_list[4];
+  for (ptrdiff_t i = 0; i < 4; i++) {
+    albums[i] = (struct Album){.source_dir = str_from_cstr(names[i][0]),
+                               .output_path = str_from_cstr(names[i][1])};
+    album_list[i] = &albums[i];
+  }
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
+
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, album_list, 4, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "output path for 'gallery/photos/b' nests under output path for "
+                         "'gallery/photos/a': 'gallery/public/trip/index.html'\n"
+                         "output path for 'gallery/photos/d' nests under output path for "
+                         "'gallery/photos/c': 'gallery/public/walk/index.html'\n"));
+  TEST_CHECK(log.errors == 2);
 }
 
 // The root album and a configured `index.html` aggregate collide before any writer runs. The root
 // is labeled by `input_dir`, a real path, rather than a placeholder a sub-album could share.
 static void test_rejects_album_aggregate_collision(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* output_path = path_join(config.output_dir, "index.html", &arena);
-  static const char* const aggregates[] = {"index.html"};
-  config.aggregate_templates = aggregates;
-  config.aggregate_template_count = 1;
-  struct Album album = {.source_dir = "", .output_path = output_path};
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/templates/index.html", "aggregate");
+  static const struct Str aggregates[] = {STR_INIT("index.html")};
+  gallery_config.aggregate_templates = aggregates;
+  gallery_config.aggregate_template_count = 1;
+  struct Album album = {.source_dir = S(""), .output_path = S("gallery/public/index.html")};
   const struct Album* albums[] = {&album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(write_fixture_file(root_dir, "templates/index.html", "aggregate") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(output_path != NULL)) {
-    goto cleanup;
-  }
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 1,
-                                       err, sizeof(err)) == -1);
-  expected_len =
-      snprintf(expected, sizeof(expected), "duplicate output path for '%s' and '%s': '%s'",
-               config.input_dir, "aggregate_templates[0]", output_path);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 1, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "duplicate output path for 'gallery/photos' and 'aggregate_templates[0]': "
+                         "'gallery/public/index.html'\n"));
 }
 
 // One name listed twice in `aggregate_templates` is rejected with each entry named by its index
 // rather than by its own name. A bare template name reports it as `for 'dup.html' and 'dup.html'`,
 // which reads as a value colliding with itself and says nothing about which entry to remove.
 static void test_rejects_duplicate_template(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* album_output = path_join(config.output_dir, "index.html", &arena);
-  char* template_output = path_join(config.output_dir, "dup.html", &arena);
-  static const char* const aggregates[] = {"dup.html", "dup.html"};
-  config.aggregate_templates = aggregates;
-  config.aggregate_template_count = 2;
-  struct Album album = {.source_dir = "", .output_path = album_output};
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  static const struct Str aggregates[] = {STR_INIT("dup.html"), STR_INIT("dup.html")};
+  gallery_config.aggregate_templates = aggregates;
+  gallery_config.aggregate_template_count = 2;
+  struct Album album = {.source_dir = S(""), .output_path = S("gallery/public/index.html")};
   const struct Album* albums[] = {&album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(album_output != NULL && template_output != NULL)) {
-    goto cleanup;
-  }
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 1,
-                                       err, sizeof(err)) == -1);
-  expected_len =
-      snprintf(expected, sizeof(expected), "duplicate output path for '%s' and '%s': '%s'",
-               "aggregate_templates[0]", "aggregate_templates[1]", template_output);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 1, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "duplicate output path for 'aggregate_templates[0]' and "
+                         "'aggregate_templates[1]': 'gallery/public/dup.html'\n"));
 }
 
 // `manifest_builder_populate` rejects an output path that names one of the build's own input files,
@@ -612,75 +382,34 @@ cleanup:
 // media source, so the two paths differ and only filesystem identity sees the collision. An output
 // inside `input_dir` fails the root check first, as `test_rejects_output_in_input_dir` pins.
 static void test_rejects_input_overwrite(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* source_path = path_join(config.input_dir, "x.jpg", &arena);
-  char* album_output = path_join(config.output_dir, "index.html", &arena);
-  char* small = path_join(config.output_dir, "small.jpg", &arena);
-  char* large = path_join(config.output_dir, "large.jpg", &arena);
-  char* original = path_join(config.output_dir, "x.jpg", &arena);
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/photos/x.jpg", "source");
+  os_memory_link(os, "gallery/photos/x.jpg", "gallery/public/x.jpg");
   struct MediaDerivative derivatives[] = {
-      {.name = "s", .path = small},
-      {.name = "l", .path = large},
+      {.name = S("s"), .path = S("gallery/public/small.jpg")},
+      {.name = S("l"), .path = S("gallery/public/large.jpg")},
   };
-  struct MediaItem media = {.source_path = source_path,
+  struct MediaItem media = {.source_path = S("gallery/photos/x.jpg"),
                             .derivatives = derivatives,
                             .derivative_count = 2,
-                            .original_path = original};
+                            .original_path = S("gallery/public/x.jpg")};
   struct MediaItem* media_items[] = {&media};
-  struct Album album = {
-      .source_dir = "", .output_path = album_output, .media = media_items, .media_count = 1};
+  struct Album album = {.source_dir = S(""),
+                        .output_path = S("gallery/public/index.html"),
+                        .media = media_items,
+                        .media_count = 1};
   const struct Album* albums[] = {&album};
-  struct PathList sources;
-  struct PathList static_paths;
-  path_list_init(&sources);
-  path_list_init(&static_paths);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(write_fixture_file(root_dir, "photos/x.jpg", "source") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(source_path != NULL && album_output != NULL && small != NULL && large != NULL &&
-                  original != NULL)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_mkdir_p(config.output_dir, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(link(source_path, original) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(path_list_push(&sources, source_path) == 0)) {
-    goto cleanup;
-  }
+  struct Arena arena = test_arena();
+  struct PathList sources = {0};
+  path_list_push(&sources, S("gallery/photos/x.jpg"), &arena);
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &sources, &static_paths,
-                                       albums, 1, err, sizeof(err)) == -1);
-  expected_len =
-      snprintf(expected, sizeof(expected), "output path would overwrite build input for '%s': '%s'",
-               source_path, original);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&sources);
-  path_list_free(&static_paths);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(populate(&manifest, &gallery_config, &sources, NULL, albums, 1, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "output path would overwrite build input for 'gallery/photos/x.jpg': "
+                         "'gallery/public/x.jpg'\n"));
 }
 
 // The input check finds an aimed-at source wherever it falls among many claimed inputs, and still
@@ -689,86 +418,50 @@ cleanup:
 // original is a hard link to its source, for the reason `test_rejects_input_overwrite` gives.
 static void test_rejects_input_overwrite_among_many_inputs(void) {
   enum { SOURCE_COUNT = 32 };
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/public/existing.jpg", "output");
+  struct Arena arena = test_arena();
+  struct PathList sources = {0};
+  for (ptrdiff_t i = SOURCE_COUNT; i > 0; i--) {
+    char source_path[48];
+    (void)snprintf(source_path, sizeof(source_path), "gallery/photos/%02td.jpg", i - 1);
+    os_memory_write(os, source_path, "source");
   }
-  char* existing_output = path_join(config.output_dir, "existing.jpg", &arena);
-  char* album_output = path_join(config.output_dir, "index.html", &arena);
-  struct PathList sources;
-  struct PathList static_paths;
-  path_list_init(&sources);
-  path_list_init(&static_paths);
-  if (!TEST_CHECK(write_fixture_file(root_dir, "public/existing.jpg", "output") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(existing_output != NULL && album_output != NULL)) {
-    goto cleanup;
-  }
-  for (size_t i = SOURCE_COUNT; i > 0; i--) {
-    char relative[32];
-    (void)snprintf(relative, sizeof(relative), "photos/%02zu.jpg", i - 1);
-    if (!TEST_CHECK(write_fixture_file(root_dir, relative, "source") == 0)) {
-      goto cleanup;
-    }
-  }
-  for (size_t i = 0; i < SOURCE_COUNT; i++) {
-    char name[16];
-    (void)snprintf(name, sizeof(name), "%02zu.jpg", i);
-    char* source_path = path_join(config.input_dir, name, &arena);
-    if (!TEST_CHECK(source_path != NULL && path_list_push(&sources, source_path) == 0)) {
-      goto cleanup;
-    }
+  for (ptrdiff_t i = 0; i < SOURCE_COUNT; i++) {
+    struct Buf source_path = {.arena = &arena};
+    buf_printf(&source_path, "gallery/photos/%02td.jpg", i);
+    path_list_push(&sources, buf_str(&source_path), &arena);
   }
 
-  static const size_t targets[] = {0, SOURCE_COUNT / 2, SOURCE_COUNT - 1};
-  for (size_t i = 0; i < sizeof(targets) / sizeof(targets[0]); i++) {
-    const char* target = sources.items[targets[i]];
-    char name[16];
-    (void)snprintf(name, sizeof(name), "%02zu.jpg", targets[i]);
-    char* original = path_join(config.output_dir, name, &arena);
-    if (!TEST_CHECK(original != NULL && link(target, original) == 0)) {
-      goto cleanup;
-    }
-    char expected[ERROR_MESSAGE_SIZE];
-    const int expected_len =
-        snprintf(expected, sizeof(expected),
-                 "output path would overwrite build input for '%s': '%s'", target, original);
-    if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-      goto cleanup;
-    }
+  static const ptrdiff_t targets[] = {0, SOURCE_COUNT / 2, SOURCE_COUNT - 1};
+  for (ptrdiff_t i = 0; i < (ptrdiff_t)(sizeof(targets) / sizeof(targets[0])); i++) {
+    const struct Str target = sources.items[targets[i]];
+    struct Buf original = {.arena = &arena};
+    buf_printf(&original, "gallery/public/%02td.jpg", targets[i]);
+    os_memory_link(os, str_cstr(target, &arena), buf_cstr(&original));
     // The existing output comes first, so a lookup that wrongly matched it would name it instead.
-    struct MediaDerivative derivatives[] = {{.name = "s", .path = existing_output}};
+    struct MediaDerivative derivatives[] = {
+        {.name = S("s"), .path = S("gallery/public/existing.jpg")}};
     struct MediaItem media = {.source_path = target,
                               .derivatives = derivatives,
                               .derivative_count = 1,
-                              .original_path = original};
+                              .original_path = buf_str(&original)};
     struct MediaItem* media_items[] = {&media};
-    struct Album album = {
-        .source_dir = "", .output_path = album_output, .media = media_items, .media_count = 1};
+    struct Album album = {.source_dir = S(""),
+                          .output_path = S("gallery/public/index.html"),
+                          .media = media_items,
+                          .media_count = 1};
     const struct Album* albums[] = {&album};
-    struct Manifest manifest;
-    manifest_init(&manifest);
-    char err[ERROR_MESSAGE_SIZE] = "";
+    struct Manifest manifest = {0};
+    struct Log log = test_log();
 
-    TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &sources, &static_paths,
-                                         albums, 1, err, sizeof(err)) == -1);
-    TEST_CHECK(strcmp(err, expected) == 0);
-    TEST_MSG("target %zu: '%s'", targets[i], err);
-    manifest_free(&manifest);
+    TEST_CHECK(populate(&manifest, &gallery_config, &sources, NULL, albums, 1, os, &log) == -1);
+    const struct Str original_path = buf_str(&original);
+    TEST_CHECK(test_log_is(&log, "output path would overwrite build input for '%.*s': '%.*s'\n",
+                           STR_FMT(target), STR_FMT(original_path)));
+    TEST_MSG("target %td", targets[i]);
   }
-
-cleanup:
-  path_list_free(&sources);
-  path_list_free(&static_paths);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
 }
 
 // The config file is an input like any other, so an output path naming it is rejected. Without this
@@ -776,49 +469,21 @@ cleanup:
 // the gallery root plus an aggregate template named `fram.toml` is all it takes, and the loss is
 // unrecoverable.
 static void test_rejects_config_overwrite(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* album_output = path_join(config.output_dir, "index.html", &arena);
-  static const char* const aggregates[] = {"fram.toml"};
-  config.output_dir = root_dir;
-  config.aggregate_templates = aggregates;
-  config.aggregate_template_count = 1;
-  struct Album album = {.source_dir = "", .output_path = album_output};
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  static const struct Str aggregates[] = {STR_INIT("fram.toml")};
+  gallery_config.output_dir = S("gallery");
+  gallery_config.aggregate_templates = aggregates;
+  gallery_config.aggregate_template_count = 1;
+  struct Album album = {.source_dir = S(""), .output_path = S("gallery/public/index.html")};
   const struct Album* albums[] = {&album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(album_output != NULL)) {
-    goto cleanup;
-  }
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 1,
-                                       err, sizeof(err)) == -1);
-  expected_len =
-      snprintf(expected, sizeof(expected), "output path would overwrite build input for '%s': '%s'",
-               "aggregate_templates[0]", config_path);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 1, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "output path would overwrite build input for 'aggregate_templates[0]': "
+                         "'gallery/fram.toml'\n"));
 }
 
 // Every file below `templates_dir` is a build input, so an output naming the album template or a
@@ -828,143 +493,66 @@ cleanup:
 // configuration, so only the walk of the template tree can claim it, which is the case a claim of
 // just the configured templates would miss.
 static void test_rejects_template_overwrite(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* template_path = path_join(config.templates_dir, "album.html", &arena);
-  char* partial_path = path_join(config.templates_dir, "partials/card.html", &arena);
-  char* template_output = path_join(config.output_dir, "index.html", &arena);
-  char* partial_output = path_join(config.output_dir, "card.html", &arena);
-  char* album_output = path_join(config.output_dir, "page.html", &arena);
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Album template_album = {.source_dir = "", .output_path = template_output};
-  const struct Album* template_albums[] = {&template_album};
-  struct Manifest template_manifest;
-  manifest_init(&template_manifest);
-  char template_err[ERROR_MESSAGE_SIZE] = "";
-  static const char* const aggregates[] = {"card.html"};
-  struct Album partial_album = {.source_dir = "", .output_path = album_output};
-  const struct Album* partial_albums[] = {&partial_album};
-  struct Manifest partial_manifest;
-  manifest_init(&partial_manifest);
-  char partial_err[ERROR_MESSAGE_SIZE] = "";
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(write_fixture_file(root_dir, "templates/partials/card.html", "card") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(template_path != NULL && partial_path != NULL && template_output != NULL &&
-                  partial_output != NULL)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(fs_mkdir_p(config.output_dir, NULL, 0) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(link(template_path, template_output) == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(link(partial_path, partial_output) == 0)) {
-    goto cleanup;
-  }
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/templates/partials/card.html", "card");
+  os_memory_link(os, "gallery/templates/album.html", "gallery/public/index.html");
+  os_memory_link(os, "gallery/templates/partials/card.html", "gallery/public/card.html");
 
   // First case: the album page is a hard link to the configured album template.
-  TEST_CHECK(manifest_builder_populate(&template_manifest, &config, config_path, &empty, &empty,
-                                       template_albums, 1, template_err,
-                                       sizeof(template_err)) == -1);
-  expected_len =
-      snprintf(expected, sizeof(expected), "output path would overwrite build input for '%s': '%s'",
-               config.input_dir, template_output);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(template_err, expected) == 0);
+  struct Album template_album = {.source_dir = S(""),
+                                 .output_path = S("gallery/public/index.html")};
+  const struct Album* template_albums[] = {&template_album};
+  struct Manifest template_manifest = {0};
+  struct Log template_log = test_log();
+  TEST_CHECK(populate(&template_manifest, &gallery_config, NULL, NULL, template_albums, 1, os,
+                      &template_log) == -1);
+  TEST_CHECK(test_log_is(&template_log,
+                         "output path would overwrite build input for 'gallery/photos': "
+                         "'gallery/public/index.html'\n"));
 
   // Second case: an aggregate lands on a hard link to an unconfigured partial.
-  if (!TEST_CHECK(album_output != NULL)) {
-    goto cleanup;
-  }
-  config.aggregate_templates = aggregates;
-  config.aggregate_template_count = 1;
-  TEST_CHECK(manifest_builder_populate(&partial_manifest, &config, config_path, &empty, &empty,
-                                       partial_albums, 1, partial_err, sizeof(partial_err)) == -1);
-  expected_len =
-      snprintf(expected, sizeof(expected), "output path would overwrite build input for '%s': '%s'",
-               "aggregate_templates[0]", partial_output);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(partial_err, expected) == 0);
-
-cleanup:
-  manifest_free(&partial_manifest);
-  manifest_free(&template_manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  static const struct Str aggregates[] = {STR_INIT("card.html")};
+  gallery_config.aggregate_templates = aggregates;
+  gallery_config.aggregate_template_count = 1;
+  struct Album partial_album = {.source_dir = S(""), .output_path = S("gallery/public/page.html")};
+  const struct Album* partial_albums[] = {&partial_album};
+  struct Manifest partial_manifest = {0};
+  struct Log partial_log = test_log();
+  TEST_CHECK(populate(&partial_manifest, &gallery_config, NULL, NULL, partial_albums, 1, os,
+                      &partial_log) == -1);
+  TEST_CHECK(test_log_is(&partial_log,
+                         "output path would overwrite build input for 'aggregate_templates[0]': "
+                         "'gallery/public/card.html'\n"));
 }
 
 // An `output_dir` at or below an input root is rejected before anything walks or writes, whether or
 // not it exists yet, and the check creates none of it. A missing `output_dir` is judged by the
 // directory it would be created in, so a nested path, a `..` past a missing component, and a path
-// through a symlinked root all land where `fs_mkdir_p` would put them.
+// through a symlinked root all land where `os_mkdirs` would put them.
 static void test_check_output_dir_rejects_dir_in_input_root(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  if (init_manifest_fixture(root_dir, &arena, &config) == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  const char* input_link = path_join(root_dir, "photos-link", &arena);
-  const char* const input_output_dirs[] = {
-      config.input_dir,
-      path_join(root_dir, "photos/public", &arena),
-      path_join(root_dir, "photos/new/deeper", &arena),
-      path_join(root_dir, "missing/../photos/new", &arena),
-      path_join(root_dir, "photos-link/new", &arena),
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/photos/public/old.html", "old");
+  os_memory_write(os, "gallery/static/a.css", "static");
+  os_memory_symlink(os, "photos", "gallery/photos-link");
+  static const struct Str input_output_dirs[] = {
+      STR_INIT("gallery/photos"),
+      STR_INIT("gallery/photos/public"),
+      STR_INIT("gallery/photos/new/deeper"),
+      STR_INIT("gallery/missing/../photos/new"),
+      STR_INIT("gallery/photos-link/new"),
   };
-  if (!TEST_CHECK(write_fixture_file(root_dir, "photos/public/old.html", "old") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "static/a.css", "static") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(input_link != NULL)) {
-    goto cleanup;
-  }
-  TEST_CHECK(symlink(config.input_dir, input_link) == 0);
-  for (size_t i = 0; i < sizeof(input_output_dirs) / sizeof(input_output_dirs[0]); i++) {
-    if (!TEST_CHECK(input_output_dirs[i] != NULL)) {
-      goto cleanup;
-    }
-    config.output_dir = input_output_dirs[i];
-    check_rejects_output_dir_in_root(&config, "input_dir");
+  for (ptrdiff_t i = 0; i < (ptrdiff_t)(sizeof(input_output_dirs) / sizeof(input_output_dirs[0]));
+       i++) {
+    gallery_config.output_dir = input_output_dirs[i];
+    check_rejects_output_dir_in_root(&gallery_config, "input_dir", os);
   }
 
-  config.output_dir = path_join(root_dir, "templates/partials", &arena);
-  if (!TEST_CHECK(config.output_dir != NULL)) {
-    goto cleanup;
-  }
-  check_rejects_output_dir_in_root(&config, "templates_dir");
-  config.output_dir = path_join(root_dir, "static/generated", &arena);
-  if (!TEST_CHECK(config.output_dir != NULL)) {
-    goto cleanup;
-  }
-  check_rejects_output_dir_in_root(&config, "static_dir");
-
-cleanup:
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  gallery_config.output_dir = S("gallery/templates/partials");
+  check_rejects_output_dir_in_root(&gallery_config, "templates_dir", os);
+  gallery_config.output_dir = S("gallery/static/generated");
+  check_rejects_output_dir_in_root(&gallery_config, "static_dir", os);
 }
 
 // An output that would land below `input_dir` is rejected even though no file sits at its path yet,
@@ -972,379 +560,173 @@ cleanup:
 // alternate spelling of it, a symlink to it, a symlink inside `output_dir` that leads into it, and
 // an `output_dir` inside it are rejected the same way.
 static void test_rejects_output_in_input_dir(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  const char* input_dir = config.input_dir;
-  const char* input_link = path_join(root_dir, "photos-link", &arena);
-  const char* output_dir = path_join(root_dir, "out", &arena);
-  const char* output_link = path_join(root_dir, "out/link", &arena);
-  struct Album album = {.source_dir = ""};
-  const struct Album* albums[] = {&album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(write_fixture_file(root_dir, "photos/x.jpg", "source") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(input_link != NULL && output_dir != NULL && output_link != NULL)) {
-    goto cleanup;
-  }
-  TEST_CHECK(symlink(input_dir, input_link) == 0);
-  TEST_CHECK(fs_mkdir_p(output_dir, NULL, 0) == 0);
-  TEST_CHECK(symlink(input_dir, output_link) == 0);
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/photos/x.jpg", "source");
+  os_memory_symlink(os, "photos", "gallery/photos-link");
+  os_memory_mkdir(os, "gallery/out");
+  os_memory_symlink(os, "../photos", "gallery/out/link");
 
   // The output is a new file below the root, reached from an `output_dir` that holds the root.
-  config.output_dir = root_dir;
-  check_rejects_output_in_root(&config, config_path, path_join(root_dir, "photos/b.html", &arena),
-                               "input_dir");
+  gallery_config.output_dir = S("gallery");
+  check_rejects_output_in_root(&gallery_config, "gallery/photos/b.html", "input_dir", os);
 
   // The root is configured through a symlink and spelled with a `./` component.
-  config.input_dir = path_join(root_dir, "./photos-link", &arena);
-  check_rejects_output_in_root(&config, config_path,
-                               path_join(root_dir, "photos/sub/b.html", &arena), "input_dir");
+  gallery_config.input_dir = S("gallery/./photos-link");
+  check_rejects_output_in_root(&gallery_config, "gallery/photos/sub/b.html", "input_dir", os);
 
   // A symlink inside `output_dir` leads into the root.
-  config.input_dir = input_dir;
-  config.output_dir = output_dir;
-  check_rejects_output_in_root(&config, config_path, path_join(output_dir, "link/b.html", &arena),
-                               "input_dir");
-
-  // `output_dir` itself lies inside the root, and does not exist yet. Populate runs the early check
-  // itself, so a caller that skipped it is still refused, with the early check's diagnostic.
-  config.output_dir = path_join(root_dir, "photos/public", &arena);
-  if (!TEST_CHECK(config.output_dir != NULL)) {
-    goto cleanup;
-  }
-  album.output_path = path_join(config.output_dir, "index.html", &arena);
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 1,
-                                       err, sizeof(err)) == -1);
-  expected_len =
-      snprintf(expected, sizeof(expected), "output directory would write inside 'input_dir': '%s'",
-               config.output_dir);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-  TEST_MSG("actual: '%s'", err);
-  TEST_CHECK(manifest.count == 0);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  gallery_config.input_dir = S("gallery/photos");
+  gallery_config.output_dir = S("gallery/out");
+  check_rejects_output_in_root(&gallery_config, "gallery/out/link/b.html", "input_dir", os);
 }
 
 // An output that would land below `templates_dir` is rejected even though no file sits at its path
 // yet, because the same build's render could read it back as a partial. The check covers configured
 // aggregate outputs as well as album pages.
 static void test_rejects_output_in_templates_dir(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  config.output_dir = root_dir;
-  check_rejects_output_in_root(&config, config_path,
-                               path_join(root_dir, "templates/partials/b.html", &arena),
-                               "templates_dir");
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  gallery_config.output_dir = S("gallery");
+  check_rejects_output_in_root(&gallery_config, "gallery/templates/partials/b.html",
+                               "templates_dir", os);
 
   // A configured aggregate whose name leads into the template tree is rejected by its list entry.
-  char* album_output = path_join(root_dir, "public/index.html", &arena);
-  static const char* const aggregates[] = {"templates/index.html"};
-  struct Album album = {.source_dir = "", .output_path = album_output};
+  static const struct Str aggregates[] = {STR_INIT("templates/index.html")};
+  gallery_config.aggregate_templates = aggregates;
+  gallery_config.aggregate_template_count = 1;
+  struct Album album = {.source_dir = S(""), .output_path = S("gallery/public/index.html")};
   const struct Album* albums[] = {&album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(album_output != NULL)) {
-    goto cleanup;
-  }
-  config.aggregate_templates = aggregates;
-  config.aggregate_template_count = 1;
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 1,
-                                       err, sizeof(err)) == -1);
-  expected_len = snprintf(expected, sizeof(expected),
-                          "output path would write inside 'templates_dir' for "
-                          "'aggregate_templates[0]': '%s/templates/index.html'",
-                          root_dir);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-  TEST_MSG("actual: '%s'", err);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 1, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "output path would write inside 'templates_dir' for "
+                         "'aggregate_templates[0]': 'gallery/templates/index.html'\n"));
 }
 
 // An output that would land below `static_dir` is rejected, because the next build would copy it as
 // a static file.
 static void test_rejects_output_in_static_dir(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "static/a.css", "static") == 0)) {
-    goto cleanup;
-  }
-  config.output_dir = root_dir;
-  check_rejects_output_in_root(&config, config_path, path_join(root_dir, "static/b.html", &arena),
-                               "static_dir");
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/static/a.css", "static");
+  gallery_config.output_dir = S("gallery");
+  check_rejects_output_in_root(&gallery_config, "gallery/static/b.html", "static_dir", os);
+}
 
-cleanup:
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+// An output inside an input root is reported once for the album that leads there: a sub-album or a
+// media item of that album lands there for the same reason and fails without a line of its own.
+// Every other source is reported, in whichever root it lands, because its output may land there for
+// a reason of its own, like the static file here.
+static void test_reports_input_root_once_per_album(void) {
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/photos/x.jpg", "source");
+  os_memory_write(os, "gallery/static/link/y.css", "y");
+  os_memory_mkdir(os, "gallery/out");
+  os_memory_symlink(os, "../photos", "gallery/out/link");
+  os_memory_symlink(os, "../templates", "gallery/out/tlink");
+  gallery_config.output_dir = S("gallery/out");
+
+  struct Album root = {.source_dir = S(""), .output_path = S("gallery/out/link/index.html")};
+  struct Album a = {.source_dir = S("a"), .output_path = S("gallery/out/link/a/index.html")};
+  struct Album b = {.source_dir = S("b"), .output_path = S("gallery/out/tlink/b/index.html")};
+  struct Album b_sub = {.source_dir = S("b/sub"),
+                        .output_path = S("gallery/out/tlink/b/sub/index.html")};
+  const struct Album* albums[] = {&root, &a, &b, &b_sub};
+  struct Arena arena = test_arena();
+  struct PathList static_paths = {0};
+  path_list_push(&static_paths, S("gallery/static/link/y.css"), &arena);
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, &static_paths, albums, 4, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "output path would write inside 'input_dir' for 'gallery/photos': "
+                         "'gallery/out/link/index.html'\n"
+                         "output path would write inside 'templates_dir' for 'gallery/photos/b': "
+                         "'gallery/out/tlink/b/index.html'\n"
+                         "output path would write inside 'input_dir' for "
+                         "'gallery/static/link/y.css': 'gallery/out/link/y.css'\n"));
+  TEST_CHECK(log.errors == 3);
 }
 
 // A `templates_dir` that exists but cannot be walked fails the manifest rather than claiming
-// nothing, because a partial the walk could not see would stay overwritable. A regular file in
-// place of the directory is the portable way to make the walk fail. The reason names the path the
-// walk failed on, so the configured root is not repeated ahead of it.
+// nothing, because a partial the walk could not see would stay overwritable. The reason names the
+// path the walk failed on, so the configured root is not repeated ahead of it. A regular file in
+// place of the directory and a subdirectory that refuses to be listed fail the same way.
 static void test_rejects_unlistable_templates_dir(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* album_output = path_join(config.output_dir, "index.html", &arena);
-  char* templates_dir = path_join(root_dir, "templates-file", &arena);
-  struct Album album = {.source_dir = "", .output_path = album_output};
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/templates-file", "not a directory");
+  gallery_config.templates_dir = S("gallery/templates-file");
+  struct Album album = {.source_dir = S(""), .output_path = S("gallery/public/index.html")};
   const struct Album* albums[] = {&album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char reason[FS_REASON_SIZE];
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(write_fixture_file(root_dir, "templates-file", "not a directory") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(album_output != NULL && templates_dir != NULL)) {
-    goto cleanup;
-  }
-  config.templates_dir = templates_dir;
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 1,
-                                       err, sizeof(err)) == -1);
-  expected_len = snprintf(expected, sizeof(expected),
-                          "failed to list template files: cannot open directory: %s ('%s')",
-                          error_system_message(reason, sizeof(reason), ENOTDIR), templates_dir);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 1, os, &log) == -1);
+  TEST_CHECK(test_log_is(
+      &log, "failed to list template files: cannot open directory: %s ('gallery/templates-file')\n",
+      strerror(ENOTDIR)));
   TEST_CHECK(manifest.count == 0);
 
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  os_memory_write(os, "gallery/templates/partials/card.html", "card");
+  os_memory_fail(os, OS_MEMORY_OP_LIST, "gallery/templates/partials", EACCES);
+  gallery_config.templates_dir = S("gallery/templates");
+  log = test_log();
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 1, os, &log) == -1);
+  TEST_CHECK(test_log_is(
+      &log,
+      "failed to list template files: cannot open directory: %s ('gallery/templates/partials')\n",
+      strerror(EACCES)));
 }
 
-// A configured template whose output path exceeds the whole-path limit is rejected, and the
-// diagnostic still carries the limit. This branch is reachable only when the template name is
-// longer than `OUTPUT_PATH_RELATIVE_LEN_MAX`, which is larger than `ERROR_MESSAGE_SIZE`, so leading
-// with the name would make the limit clause unreachable at every triggering input. The message
-// would be 511 bytes of filename and nothing else. Asserting the head is what pins the ordering.
+// A configured template whose output path exceeds the whole-path limit is rejected with a message
+// naming the limit, the measured length, the list entry, and the whole name.
 static void test_rejects_oversize_template_path(void) {
   char name[OUTPUT_PATH_RELATIVE_LEN_MAX + 64];
   memset(name, 'a', sizeof(name) - 1);
   name[sizeof(name) - 1] = '\0';
-  const char* aggregates[] = {name};
+  const struct Str aggregates[] = {{name, (ptrdiff_t)sizeof(name) - 1}};
 
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* album_output = path_join(config.output_dir, "index.html", &arena);
-  config.aggregate_templates = aggregates;
-  config.aggregate_template_count = 1;
-  struct Album album = {.source_dir = "", .output_path = album_output};
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  gallery_config.aggregate_templates = aggregates;
+  gallery_config.aggregate_template_count = 1;
+  struct Album album = {.source_dir = S(""), .output_path = S("gallery/public/index.html")};
   const struct Album* albums[] = {&album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char expected_head[128];
-  int expected_head_len = 0;
-  size_t err_actual_len = 0;
-  if (!TEST_CHECK(album_output != NULL)) {
-    goto cleanup;
-  }
-
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 1,
-                                       err, sizeof(err)) == -1);
-  expected_head_len = snprintf(expected_head, sizeof(expected_head),
-                               "output path exceeds max output path length (%zu bytes) at %zu "
-                               "bytes (for 'aggregate_templates[0]'): '",
-                               (size_t)OUTPUT_PATH_RELATIVE_LEN_MAX, sizeof(name) - 1);
-  TEST_CHECK(expected_head_len > 0 && (size_t)expected_head_len < sizeof(expected_head));
-  TEST_CHECK(strncmp(err, expected_head, (size_t)expected_head_len) == 0);
-  // The head is a prefix, so on its own it says nothing about the rest of the buffer. The name is
-  // `OUTPUT_PATH_RELATIVE_LEN_MAX + 63` bytes, so the composed message cannot fit `err` and must
-  // come back truncated: asserting the exact length proves that is still true. The marker proves
-  // the cut is visible to the user. The `...` is spelled out because `TRUNCATION_MARKER` is
-  // file-local to `core/error.c`. Changing it there must update this line.
-  err_actual_len = strlen(err);
-  TEST_CHECK(err_actual_len == ERROR_MESSAGE_SIZE - 1);
-  TEST_CHECK(err_actual_len >= 3 && strcmp(err + err_actual_len - 3, "...") == 0);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 1, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "output path for 'aggregate_templates[0]' exceeds max output path length "
+                         "(%d bytes) at %td bytes: '%.*s'\n",
+                         OUTPUT_PATH_RELATIVE_LEN_MAX, aggregates[0].len, STR_FMT(aggregates[0])));
 }
 
 // A configured template with one overlong path segment is rejected against the per-filename limit
-// rather than the whole-path one, so the two limits stay distinguishable. The whole message fits,
-// so it is asserted in full.
+// rather than the whole-path one, so the two limits stay distinguishable.
 static void test_rejects_oversize_template_segment(void) {
   char name[FILENAME_LEN_MAX + 32];
   memset(name, 'b', sizeof(name) - 1);
   name[sizeof(name) - 1] = '\0';
-  const char* aggregates[] = {name};
+  const struct Str aggregates[] = {{name, (ptrdiff_t)sizeof(name) - 1}};
 
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* album_output = path_join(config.output_dir, "index.html", &arena);
-  config.aggregate_templates = aggregates;
-  config.aggregate_template_count = 1;
-  struct Album album = {.source_dir = "", .output_path = album_output};
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  gallery_config.aggregate_templates = aggregates;
+  gallery_config.aggregate_template_count = 1;
+  struct Album album = {.source_dir = S(""), .output_path = S("gallery/public/index.html")};
   const struct Album* albums[] = {&album};
-  struct PathList empty;
-  path_list_init(&empty);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(album_output != NULL)) {
-    goto cleanup;
-  }
+  struct Manifest manifest = {0};
+  struct Log log = test_log();
 
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &empty, &empty, albums, 1,
-                                       err, sizeof(err)) == -1);
-  expected_len = snprintf(expected, sizeof(expected),
-                          "output path segment exceeds max filename length (%zu bytes) at %zu "
-                          "bytes (for 'aggregate_templates[0]'): '%s'",
-                          (size_t)FILENAME_LEN_MAX, sizeof(name) - 1, name);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&empty);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
-}
-
-// An enumerated static file that does not lie below `static_dir` has no path relative to it, so it
-// is rejected rather than registered at a path the copy would not reproduce. The sibling directory
-// shares `static` as a text prefix, so only the separator check tells the two apart.
-static void test_rejects_static_file_not_below_root(void) {
-  char root_dir[] = "/tmp/fram-manifest-XXXXXX";
-  struct Arena arena;
-  arena_init(&arena);
-  struct GalleryConfig config;
-  const char* config_path = init_manifest_fixture(root_dir, &arena, &config);
-  if (config_path == NULL) {
-    arena_free(&arena);
-    return;
-  }
-  char* album_output = path_join(config.output_dir, "index.html", &arena);
-  char* static_path = path_join(root_dir, "static-old/a.txt", &arena);
-  struct Album album = {.source_dir = "", .output_path = album_output};
-  const struct Album* albums[] = {&album};
-  struct PathList sources;
-  struct PathList static_paths;
-  path_list_init(&sources);
-  path_list_init(&static_paths);
-  struct Manifest manifest;
-  manifest_init(&manifest);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = 0;
-  if (!TEST_CHECK(album_output != NULL && static_path != NULL)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(path_list_push(&static_paths, static_path) == 0)) {
-    goto cleanup;
-  }
-
-  TEST_CHECK(manifest_builder_populate(&manifest, &config, config_path, &sources, &static_paths,
-                                       albums, 1, err, sizeof(err)) == -1);
-  expected_len =
-      snprintf(expected, sizeof(expected),
-               "static file path is not below configured static directory: '%s'", static_path);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-
-cleanup:
-  manifest_free(&manifest);
-  path_list_free(&sources);
-  path_list_free(&static_paths);
-  gallery_config_free(&config);
-  arena_free(&arena);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(populate(&manifest, &gallery_config, NULL, NULL, albums, 1, os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "output path segment for 'aggregate_templates[0]' exceeds max filename "
+                         "length (%d bytes) at %zu bytes: '%s'\n",
+                         FILENAME_LEN_MAX, sizeof(name) - 1, name));
 }
 
 // The writing this module guards lives in `site_writer` and `derivative_renderer`, and is tested in
@@ -1357,11 +739,11 @@ TEST_LIST = {
     {"accepts output beside input roots", test_accepts_output_beside_input_roots},
     {"check output dir accepts dir outside input roots",
      test_check_output_dir_accepts_dir_outside_input_roots},
-    {"derive template output joins output dir", test_derive_template_output_joins_output_dir},
-    {"derive static output joins output dir", test_derive_static_output_joins_output_dir},
     {"rejects duplicate", test_rejects_duplicate},
+    {"reports every collision", test_reports_every_collision},
     {"rejects case folded duplicate", test_rejects_case_folded_duplicate},
     {"rejects prefix collision", test_rejects_prefix_collision},
+    {"rejects every prefix collision", test_rejects_every_prefix_collision},
     {"rejects album aggregate collision", test_rejects_album_aggregate_collision},
     {"rejects duplicate template", test_rejects_duplicate_template},
     {"rejects input overwrite", test_rejects_input_overwrite},
@@ -1372,9 +754,9 @@ TEST_LIST = {
     {"rejects output in input dir", test_rejects_output_in_input_dir},
     {"rejects output in templates dir", test_rejects_output_in_templates_dir},
     {"rejects output in static dir", test_rejects_output_in_static_dir},
+    {"reports input root once per album", test_reports_input_root_once_per_album},
     {"rejects unlistable templates dir", test_rejects_unlistable_templates_dir},
     {"rejects oversize template path", test_rejects_oversize_template_path},
     {"rejects oversize template segment", test_rejects_oversize_template_segment},
-    {"rejects static file not below root", test_rejects_static_file_not_below_root},
     {NULL, NULL},
 };

@@ -1,17 +1,15 @@
-#define _DARWIN_C_SOURCE
-#define _DEFAULT_SOURCE
-
 #include <acutest.h>
 #include <errno.h>
-#include <signal.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
 #include "app/cli.h"
 #include "core/fram_version.h"
+#include "runtime/fs.h"
+#include "shared/str.h"
+#include "test_support.h"
 
 /**
  * @brief Parses a terminated argument vector.
@@ -24,8 +22,10 @@ static struct CliOptions parse(char** argv) {
   while (argv[argc] != NULL) {
     argc++;
   }
+  // The message lives in a reservation that is never released, so it outlives this call.
+  struct Arena arena = test_arena();
   struct CliOptions options;
-  cli_parse(&options, argc, argv);
+  cli_parse(&options, argc, argv, &arena);
   return options;
 }
 
@@ -178,7 +178,7 @@ static void test_version_long_flag(void) {
   char* argv[] = {"fram", "--version", NULL};
   struct CliOptions options = parse(argv);
   TEST_CHECK(options.action == CLI_ACTION_VERSION);
-  TEST_CHECK(options.error_message[0] == '\0');
+  TEST_CHECK(options.error_message.len == 0);
 }
 
 // `-V` resolves to the version action.
@@ -209,17 +209,17 @@ static void test_informational_flag_clears_diagnostic(void) {
   char* help_argv[] = {"fram", "--frobnicate", "--help", NULL};
   struct CliOptions options = parse(help_argv);
   TEST_CHECK(options.action == CLI_ACTION_HELP);
-  TEST_CHECK(options.error_message[0] == '\0');
+  TEST_CHECK(options.error_message.len == 0);
 
   char* version_argv[] = {"fram", "--frobnicate", "--version", NULL};
   options = parse(version_argv);
   TEST_CHECK(options.action == CLI_ACTION_VERSION);
-  TEST_CHECK(options.error_message[0] == '\0');
+  TEST_CHECK(options.error_message.len == 0);
 
   char* cluster_argv[] = {"fram", "-Vx", NULL};
   options = parse(cluster_argv);
   TEST_CHECK(options.action == CLI_ACTION_VERSION);
-  TEST_CHECK(options.error_message[0] == '\0');
+  TEST_CHECK(options.error_message.len == 0);
 }
 
 // A valid `--version` wins in either order next to a rejected `--version=1`. The rejected spelling
@@ -229,12 +229,12 @@ static void test_valid_version_flag_wins_over_rejected_spelling(void) {
   char* valid_first[] = {"fram", "--version", "--version=1", NULL};
   struct CliOptions options = parse(valid_first);
   TEST_CHECK(options.action == CLI_ACTION_VERSION);
-  TEST_CHECK(options.error_message[0] == '\0');
+  TEST_CHECK(options.error_message.len == 0);
 
   char* rejected_first[] = {"fram", "--version=1", "--version", NULL};
   options = parse(rejected_first);
   TEST_CHECK(options.action == CLI_ACTION_VERSION);
-  TEST_CHECK(options.error_message[0] == '\0');
+  TEST_CHECK(options.error_message.len == 0);
 }
 
 // A non-numeric worker count is rejected with a diagnostic naming the offending value.
@@ -243,7 +243,7 @@ static void test_invalid_worker_count_rejected(void) {
   struct CliOptions options = parse(argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
   TEST_CHECK(
-      strcmp(options.error_message, "option '--workers' must be a positive integer: 'abc'") == 0);
+      str_eq(options.error_message, S("option '--workers' must be a positive integer: 'abc'")));
 }
 
 // A worker count of zero is rejected, naming the offending value.
@@ -251,8 +251,8 @@ static void test_zero_worker_count_rejected(void) {
   char* argv[] = {"fram", "build", "--workers", "0", NULL};
   struct CliOptions options = parse(argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "option '--workers' must be a positive integer: '0'") ==
-             0);
+  TEST_CHECK(
+      str_eq(options.error_message, S("option '--workers' must be a positive integer: '0'")));
 }
 
 // A negative worker count in attached form reaches `parse_size`'s sign rejection, and the
@@ -262,44 +262,30 @@ static void test_negative_worker_count_rejected(void) {
   char* argv[] = {"fram", "build", "--workers=-1", NULL};
   struct CliOptions options = parse(argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "option '--workers' must be a positive integer: '-1'") ==
-             0);
+  TEST_CHECK(
+      str_eq(options.error_message, S("option '--workers' must be a positive integer: '-1'")));
 }
 
-// A worker count above the accepted ceiling is rejected. The value at the ceiling is accepted, so
-// the boundary itself is pinned rather than just the rejection. `WORKER_COUNT_MAX` is file-local to
-// `cli.c`, so the limit is spelled here as a literal. Changing it must update these two cases and
-// the expected message below.
-static void test_oversize_worker_count_rejected(void) {
-  char* argv[] = {"fram", "build", "--workers", "1025", NULL};
+// A worker count above the CPU count is accepted. The build caps it at four per online CPU.
+static void test_large_worker_count_accepted(void) {
+  char* argv[] = {"fram", "build", "--workers", "5000", NULL};
   struct CliOptions options = parse(argv);
-  TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message,
-                    "option '--workers' exceeds max worker count (1024) at 1025") == 0);
-
-  char* at_limit[] = {"fram", "build", "--workers", "1024", NULL};
-  options = parse(at_limit);
   TEST_CHECK(options.action == CLI_ACTION_RUN);
-  TEST_CHECK(options.worker_count == 1024);
-  TEST_CHECK(options.error_message[0] == '\0');
+  TEST_CHECK(options.worker_count == 5000);
 }
 
-// `-w` with no following value is rejected with a diagnostic that it requires a worker count,
-// naming the short spelling.
-static void test_missing_worker_count_short_flag(void) {
-  char* argv[] = {"fram", "build", "-w", NULL};
-  struct CliOptions options = parse(argv);
+// `-w` or `--workers` with no following value is rejected with a diagnostic that it requires a
+// worker count. Both spellings name the option `--workers`, as its other diagnostics do.
+static void test_missing_worker_count_rejected(void) {
+  char* short_argv[] = {"fram", "build", "-w", NULL};
+  struct CliOptions options = parse(short_argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "option '-w' requires a worker count") == 0);
-}
+  TEST_CHECK(str_eq(options.error_message, S("option '--workers' requires a worker count")));
 
-// `--workers` with no following value is rejected with a diagnostic that it requires a worker
-// count, naming the long spelling.
-static void test_missing_worker_count_long_flag(void) {
-  char* argv[] = {"fram", "build", "--workers", NULL};
-  struct CliOptions options = parse(argv);
+  char* long_argv[] = {"fram", "build", "--workers", NULL};
+  options = parse(long_argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "option '--workers' requires a worker count") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("option '--workers' requires a worker count")));
 }
 
 // A flag that takes no value rejects an attached `=value` and names the complete token. copt
@@ -312,17 +298,17 @@ static void test_attached_value_rejected_on_valueless_flags(void) {
   struct CliOptions options = parse(verbose_argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
   TEST_CHECK(!options.is_verbose);
-  TEST_CHECK(strcmp(options.error_message, "option does not take a value: '--verbose=0'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("option does not take a value: '--verbose=0'")));
 
   char* help_argv[] = {"fram", "--help=nope", NULL};
   options = parse(help_argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "option does not take a value: '--help=nope'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("option does not take a value: '--help=nope'")));
 
   char* version_argv[] = {"fram", "--version=nope", NULL};
   options = parse(version_argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "option does not take a value: '--version=nope'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("option does not take a value: '--version=nope'")));
 }
 
 // The short form of each valueless flag rejects an attached value and names the complete element.
@@ -334,17 +320,17 @@ static void test_attached_value_rejected_on_valueless_short_flags(void) {
   struct CliOptions options = parse(verbose_argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
   TEST_CHECK(!options.is_verbose);
-  TEST_CHECK(strcmp(options.error_message, "option does not take a value: '-v=0'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("option does not take a value: '-v=0'")));
 
   char* help_argv[] = {"fram", "-h=1", NULL};
   options = parse(help_argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "option does not take a value: '-h=1'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("option does not take a value: '-h=1'")));
 
   char* version_argv[] = {"fram", "-V=1", NULL};
   options = parse(version_argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "option does not take a value: '-V=1'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("option does not take a value: '-V=1'")));
 }
 
 // A rejected attached value ends its short cluster, so the letters after the `=` are not read as
@@ -355,12 +341,12 @@ static void test_attached_value_rejection_ends_short_cluster(void) {
   struct CliOptions options = parse(version_argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
   TEST_CHECK(!options.is_verbose);
-  TEST_CHECK(strcmp(options.error_message, "option does not take a value: '-v=V'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("option does not take a value: '-v=V'")));
 
   char* help_argv[] = {"fram", "-v=h", NULL};
   options = parse(help_argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "option does not take a value: '-v=h'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("option does not take a value: '-v=h'")));
 }
 
 // An unrecognized short option is rejected with a diagnostic naming the option.
@@ -368,7 +354,7 @@ static void test_unknown_short_option(void) {
   char* argv[] = {"fram", "build", "-x", NULL};
   struct CliOptions options = parse(argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "unknown option '-x'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("unknown option '-x'")));
 }
 
 // A value attached to an unknown short option ends its cluster, so the `V` in `-x=V` does not
@@ -377,7 +363,7 @@ static void test_unknown_short_option_value_ends_cluster(void) {
   char* argv[] = {"fram", "build", "-x=V", NULL};
   struct CliOptions options = parse(argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "unknown option '-x'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("unknown option '-x'")));
 }
 
 // An unrecognized long option is rejected with a diagnostic naming the option.
@@ -385,7 +371,7 @@ static void test_unknown_long_option(void) {
   char* argv[] = {"fram", "build", "--frobnicate", NULL};
   struct CliOptions options = parse(argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "unknown option '--frobnicate'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("unknown option '--frobnicate'")));
 }
 
 // No arguments at all are reported as an error with a diagnostic message.
@@ -393,7 +379,7 @@ static void test_no_args_rejected(void) {
   char* argv[] = {"fram", NULL};
   struct CliOptions options = parse(argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "no command specified") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("no command specified")));
 }
 
 // The config command rejects a build-only flag like `-v`, naming the command and the flag.
@@ -401,8 +387,8 @@ static void test_config_command_rejects_verbose(void) {
   char* argv[] = {"fram", "config", "-v", NULL};
   struct CliOptions options = parse(argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "command 'config' does not accept option '--verbose'") ==
-             0);
+  TEST_CHECK(
+      str_eq(options.error_message, S("command 'config' does not accept option '--verbose'")));
 }
 
 // The config command rejects a build-only flag like `-w`, naming the command and the flag.
@@ -410,8 +396,8 @@ static void test_config_command_rejects_workers(void) {
   char* argv[] = {"fram", "config", "-w", "4", NULL};
   struct CliOptions options = parse(argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "command 'config' does not accept option '--workers'") ==
-             0);
+  TEST_CHECK(
+      str_eq(options.error_message, S("command 'config' does not accept option '--workers'")));
 }
 
 // With two unsupported flags, the reported one is fixed by the `cli_flags` table order rather than
@@ -423,14 +409,14 @@ static void test_config_command_rejects_first_flag_in_table_order(void) {
   char* verbose_first[] = {"fram", "config", "-v", "-w", "4", NULL};
   struct CliOptions options = parse(verbose_first);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "command 'config' does not accept option '--verbose'") ==
-             0);
+  TEST_CHECK(
+      str_eq(options.error_message, S("command 'config' does not accept option '--verbose'")));
 
   char* workers_first[] = {"fram", "config", "-w", "4", "-v", NULL};
   options = parse(workers_first);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "command 'config' does not accept option '--verbose'") ==
-             0);
+  TEST_CHECK(
+      str_eq(options.error_message, S("command 'config' does not accept option '--verbose'")));
 }
 
 // An unrecognized command is rejected with a diagnostic naming the command.
@@ -438,7 +424,7 @@ static void test_unknown_command(void) {
   char* argv[] = {"fram", "serve", NULL};
   struct CliOptions options = parse(argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "unknown command 'serve'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("unknown command 'serve'")));
 }
 
 // A trailing positional argument the command does not accept is rejected, naming the argument.
@@ -446,85 +432,50 @@ static void test_extra_positional_argument(void) {
   char* argv[] = {"fram", "build", "extra", NULL};
   struct CliOptions options = parse(argv);
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
-  TEST_CHECK(strcmp(options.error_message, "unexpected argument 'extra'") == 0);
+  TEST_CHECK(str_eq(options.error_message, S("unexpected argument 'extra'")));
 }
 
 // The generated version accessor returns a non-empty version.
 static void test_version_accessor_present(void) {
-  TEST_CHECK(fram_version_string()[0] != '\0');
+  TEST_CHECK(fram_version_string().len > 0);
 }
 
-// `cli_print_version` writes exactly one `fram <version>` line and nothing else.
+// `cli_print_version` writes exactly one `fram <version>` line to standard output and nothing else.
 static void test_print_version_writes_version_line(void) {
-  char* buf = NULL;
-  size_t len = 0;
-  FILE* stream = open_memstream(&buf, &len);
-  TEST_ASSERT(stream != NULL);
-  if (stream == NULL) {
+  char text[64];
+  struct StreamCapture capture;
+  if (capture_begin(stdout, &capture) != 0) {
     return;
   }
-  TEST_CHECK(cli_print_version(stream) == 0);
-  const int rc = fclose(stream);
-  TEST_ASSERT(rc == 0);
+  const int rc = cli_print_version(os_posix(), test_arena());
+  const bool is_captured = capture_end(&capture, text, sizeof(text)) == 0;
+  TEST_CHECK(rc == 0);
+  if (!TEST_CHECK(is_captured)) {
+    return;
+  }
 
+  const struct Str version = fram_version_string();
   char expected[64];
-  const int expected_len = snprintf(expected, sizeof(expected), "fram %s\n", fram_version_string());
+  const int expected_len = snprintf(expected, sizeof(expected), "fram %.*s\n", STR_FMT(version));
   TEST_ASSERT(expected_len > 0 && (size_t)expected_len < sizeof(expected));
-  TEST_CHECK(strcmp(buf, expected) == 0);
-  TEST_CHECK(len == strlen(expected));
-  free(buf);
+  TEST_CHECK(strcmp(text, expected) == 0);
 }
 
-// A stream that latched a write error makes `cli_print_version` report `-1` with `errno` set, which
-// lets `cli_dispatch` name a reason rather than exiting silently. The reason is `EIO` rather than
-// the underlying `EBADF`. A latched error's own `errno` may have been overwritten by the time it is
-// noticed, so the contract substitutes a generic I/O failure instead of relaying a stale value. A
-// read-mode stream is the deterministic way to reach that branch, because the write fails at the
-// `fprintf` while `fflush` itself succeeds.
+// A standard output that refuses the write makes `cli_print_version` report `-1` with the write's
+// own `errno`, which lets `cli_dispatch` name a reason rather than exiting silently. A read-only
+// descriptor in place of standard output is the deterministic way there: every write to it fails
+// with `EBADF`.
 static void test_print_version_reports_write_failure(void) {
-  FILE* stream = fopen("/dev/null", "r");
-  TEST_ASSERT(stream != NULL);
-  if (stream == NULL) {
+  struct StreamCapture capture;
+  if (capture_begin_unwritable(stdout, &capture) != 0) {
     return;
   }
   errno = 0;
-  TEST_CHECK(cli_print_version(stream) == -1);
-  TEST_CHECK(errno == EIO);
-  const int close_rc = fclose(stream);
-  TEST_CHECK(close_rc == 0);
-}
-
-// When `fflush` itself fails, the write's own `errno` survives instead of being replaced by the
-// `EIO` the latched-error branch substitutes. That distinction is why `cli_dispatch` reports a
-// reason rather than only an exit code. A closed pipe and a full disk need different responses. The
-// test above reaches the `ferror` branch, where the write already failed at `fprintf` and `fflush`
-// succeeds. This one reaches the other branch. A pipe with its read end closed is the deterministic
-// way there, with `SIGPIPE` ignored so the process survives to return.
-static void test_print_version_reports_flush_failure_errno(void) {
-  void (*previous)(int) = signal(SIGPIPE, SIG_IGN);
-  int fds[2];
-  TEST_ASSERT(pipe(fds) == 0);
-  TEST_ASSERT(close(fds[0]) == 0);
-  FILE* stream = fdopen(fds[1], "w");
-  TEST_ASSERT(stream != NULL);
-  if (stream == NULL) {
-    (void)close(fds[1]);
-    (void)signal(SIGPIPE, previous);
-    return;
-  }
-
-  errno = 0;
-  const int rc = cli_print_version(stream);
-  const int reported = errno;
-  // Once a flush has failed, libc implementations differ on whether `fclose` reports the stream's
-  // existing error or succeeds because no buffered output remains. Either result closes it.
-  (void)fclose(stream);
-  (void)signal(SIGPIPE, previous);
-
+  const int rc = cli_print_version(os_posix(), test_arena());
+  const int print_errno = errno;
+  TEST_CHECK(capture_end(&capture, NULL, 0) == 0);
   TEST_CHECK(rc == -1);
-  // This is `EPIPE`, not the `EIO` substitute. `fflush` observed the failure, so its `errno` is
-  // current and passes through untouched.
-  TEST_CHECK(reported == EPIPE);
+  TEST_CHECK(print_errno == EBADF);
 }
 
 // `cli_print_usage` substitutes the caller's program name into the usage line, in the right
@@ -535,7 +486,7 @@ static void test_print_version_reports_flush_failure_errno(void) {
 // back. The full help text is prose and is deliberately not asserted whole. The usage line is the
 // part callers copy.
 static void test_print_usage_names_program_and_command(void) {
-  static const char* const prog_name = "/opt/bin/myfram";
+  static const struct Str prog_name = STR_INIT("/opt/bin/myfram");
   const struct {
     enum CliCommand command;
     const char* usage_line;
@@ -545,40 +496,40 @@ static void test_print_usage_names_program_and_command(void) {
       {CLI_COMMAND_CONFIG, "    /opt/bin/myfram config [options]\n", "-h, --help"},
       {CLI_COMMAND_NONE, "    /opt/bin/myfram <command> [options]\n", "-V, --version"},
   };
-  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-    char* buf = NULL;
-    size_t len = 0;
-    FILE* stream = open_memstream(&buf, &len);
-    TEST_ASSERT(stream != NULL);
-    if (stream == NULL) {
+  for (ptrdiff_t i = 0; i < (ptrdiff_t)(sizeof(cases) / sizeof(cases[0])); i++) {
+    char text[4096];
+    struct StreamCapture capture;
+    if (capture_begin(stdout, &capture) != 0) {
       return;
     }
-    TEST_CHECK(cli_print_usage(stream, prog_name, cases[i].command) == 0);
-    const int rc = fclose(stream);
-    TEST_ASSERT(rc == 0);
-    TEST_CHECK(strstr(buf, cases[i].usage_line) != NULL);
-    TEST_CHECK(strstr(buf, cases[i].needle) != NULL);
+    const int rc = cli_print_usage(prog_name, cases[i].command, os_posix(), test_arena());
+    const bool is_captured = capture_end(&capture, text, sizeof(text)) == 0;
+    TEST_CHECK(rc == 0);
+    if (!TEST_CHECK(is_captured)) {
+      return;
+    }
+    TEST_CHECK(strstr(text, cases[i].usage_line) != NULL);
+    TEST_CHECK(strstr(text, cases[i].needle) != NULL);
     // The command-less help substitutes the name a second time, in the trailer.
     if (cases[i].command == CLI_COMMAND_NONE) {
-      TEST_CHECK(strstr(buf, "Use '/opt/bin/myfram <command> --help'") != NULL);
+      TEST_CHECK(strstr(text, "Use '/opt/bin/myfram <command> --help'") != NULL);
     }
-    free(buf);
   }
 }
 
 // `cli_print_usage` reports a failed write the same way, so neither informational action can exit
 // non-zero without a reason.
 static void test_print_usage_reports_write_failure(void) {
-  FILE* stream = fopen("/dev/null", "r");
-  TEST_ASSERT(stream != NULL);
-  if (stream == NULL) {
+  struct StreamCapture capture;
+  if (capture_begin_unwritable(stdout, &capture) != 0) {
     return;
   }
   errno = 0;
-  TEST_CHECK(cli_print_usage(stream, "fram", CLI_COMMAND_NONE) == -1);
-  TEST_CHECK(errno == EIO);
-  const int close_rc = fclose(stream);
-  TEST_CHECK(close_rc == 0);
+  const int rc = cli_print_usage(S("fram"), CLI_COMMAND_NONE, os_posix(), test_arena());
+  const int print_errno = errno;
+  TEST_CHECK(capture_end(&capture, NULL, 0) == 0);
+  TEST_CHECK(rc == -1);
+  TEST_CHECK(print_errno == EBADF);
 }
 
 TEST_LIST = {
@@ -607,9 +558,8 @@ TEST_LIST = {
     {"invalid worker count rejected", test_invalid_worker_count_rejected},
     {"zero worker count rejected", test_zero_worker_count_rejected},
     {"negative worker count rejected", test_negative_worker_count_rejected},
-    {"oversize worker count rejected", test_oversize_worker_count_rejected},
-    {"missing worker count short flag", test_missing_worker_count_short_flag},
-    {"missing worker count long flag", test_missing_worker_count_long_flag},
+    {"large worker count accepted", test_large_worker_count_accepted},
+    {"missing worker count rejected", test_missing_worker_count_rejected},
     {"attached value rejected on valueless flags", test_attached_value_rejected_on_valueless_flags},
     {"attached value rejected on valueless short flags",
      test_attached_value_rejected_on_valueless_short_flags},
@@ -628,7 +578,6 @@ TEST_LIST = {
     {"version accessor present", test_version_accessor_present},
     {"print version writes version line", test_print_version_writes_version_line},
     {"print version reports write failure", test_print_version_reports_write_failure},
-    {"print version reports flush failure errno", test_print_version_reports_flush_failure_errno},
     {"print usage names program and command", test_print_usage_names_program_and_command},
     {"print usage reports write failure", test_print_usage_reports_write_failure},
     {NULL, NULL},

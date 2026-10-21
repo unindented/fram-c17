@@ -1,31 +1,38 @@
-// `flockfile`/`funlockfile` are POSIX rather than C17, so a strict `-std=c17` compile hides them
-// unless the platform's feature-test macro asks for them: `_DARWIN_C_SOURCE` on macOS,
-// `_DEFAULT_SOURCE` on glibc. Both must precede every `#include`, because a libc header resolves
-// its own visibility guards the first time it is included.
-#define _DARWIN_C_SOURCE
-#define _DEFAULT_SOURCE
-
 #include "build/job.h"
 
-#include <stdarg.h>
+#include <assert.h>
+#include <errno.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 
 #include "core/error.h"
+#include "runtime/os.h"
 #include "runtime/pool.h"
-#include "shared/string_buffer.h"
+#include "shared/arena.h"
+#include "shared/buf.h"
+#include "shared/log.h"
+#include "shared/str.h"
 
-/** One running parallel phase: its error slots and the adapter state around the caller's job. */
+/** One running parallel phase: its jobs' logs and the adapter state around the caller's job. */
 struct JobSet {
-  /** One error message per job, indexed by job index. Empty means success. */
-  char (*errors)[ERROR_MESSAGE_SIZE];
+  /**
+   * One log per job, indexed by job index. A job with no errors succeeded.
+   */
+  struct Log* logs;
 
-  /** Number of jobs, and therefore error slots. Printed as the denominator of the progress line. */
-  size_t count;
+  /** Number of jobs, and therefore logs. Printed as the denominator of the progress line. */
+  ptrdiff_t count;
+
+  /** One set of arenas per worker, indexed by the worker index `pool_run` passes each job. */
+  struct JobArenas* worker_arenas;
+
+  /**
+   * One arena per worker, indexed like `worker_arenas`, holding the logs of that worker's jobs. A
+   * worker runs one job at a time, so its jobs' logs never grow at once.
+   */
+  struct Arena* worker_log_arenas;
 
   /** Caller's job, invoked once per index. Read-only during the run. */
   JobFn job_fn;
@@ -34,215 +41,285 @@ struct JobSet {
   void* userdata;
 
   /** Phase name leading each progress line, and named when the run fails without a diagnostic. */
-  const char* phase_label;
+  struct Str phase_label;
+
+  /** Text that starts a job's own name at the end of a line, or empty for none. */
+  struct Str attribution;
 
   /** Whether each finished job prints a progress line to `stderr`. */
   bool is_verbose;
 
+  /** Host the progress lines are printed on. */
+  struct Os* os;
+
   /**
    * Jobs finished so far. Every worker increments it, so it is atomic. The only other memory a
-   * worker writes is its own error slot.
+   * worker writes is its own jobs' logs, its own entry of `worker_log_arenas` and its own arenas.
    */
-  atomic_size_t completed_count;
+  atomic_ptrdiff_t completed_count;
 };
+
+/**
+ * @brief Divides the free space of `arena` into one log share per worker and one more, and gives
+ *        each worker one of them. A step of `job_run`.
+ *
+ * @param arena        Arena the shares are taken from, which keeps the last one. Must not be
+ *                     `NULL`.
+ * @param worker_count Requested worker threads. Must be positive.
+ * @return One log arena per worker.
+ */
+static struct Arena* job_run_split_worker_logs(struct Arena* arena, ptrdiff_t worker_count)
+    __attribute__((nonnull(1)));
 
 /**
  * @brief Runs one job and prints its progress line. This is the `PoolJobFn` behind `job_run`.
  *
  * @param index    Job index to run.
+ * @param worker   Index of the worker running the job, which selects its arenas.
  * @param userdata `struct JobSet*` of the running phase. Must not be `NULL`.
  * @return The job's own result: `0` on success, or `-1` on failure.
  */
-static int run_one_job(size_t index, void* userdata) __attribute__((nonnull(2)));
+static int job_run_one(ptrdiff_t index, ptrdiff_t worker, void* userdata)
+    __attribute__((nonnull(3)));
 
 /**
- * @brief Appends every distinct job diagnostic, the remainder count, and a fallback diagnostic.
+ * @brief Counts a finished job and prints the progress line that names the new count. A step of
+ *        `job_run_one`.
  *
- * Runs after `pool_run` has joined every worker, so the slots are read unsynchronized.
- *
- * @param jobs      Finished job set. Must not be `NULL`.
- * @param pool_rc   Result of `pool_run`.
- * @param error_out Growable buffer receiving the diagnostics. Must not be `NULL`.
- * @return `0` when the phase succeeded, or `-1` when it failed or a diagnostic could not be
- *         appended.
+ * @param jobs   Running phase, whose count it raises and whose host, label and job count the line
+ *               uses. Must not be `NULL`.
+ * @param worker Index of the worker that ran the job, whose scratch region holds the line.
  */
-static int run_report_errors(const struct JobSet* jobs, int pool_rc, struct StringBuffer* error_out)
+static void job_run_one_print_progress(struct JobSet* jobs, ptrdiff_t worker)
+    __attribute__((nonnull(1)));
+
+/**
+ * @brief Appends every failed job's log in job order, the remainder count, and a fallback error.
+ *
+ * Runs after `pool_run` has joined every worker, so the logs are read unsynchronized.
+ *
+ * @param jobs    Finished job set. Must not be `NULL`.
+ * @param pool_rc Result of `pool_run`.
+ * @param log     Log receiving the errors. Must not be `NULL`.
+ * @return `0` when the phase succeeded, or `-1` when it failed.
+ */
+static int job_run_report_errors(const struct JobSet* jobs, int pool_rc, struct Log* log)
     __attribute__((nonnull(1, 3)));
 
 /**
- * @brief Reports whether a message was already appended to this run's report.
+ * @brief Reports whether a job's messages repeat the messages of an earlier job.
  *
- * @param reported       Borrowed messages appended so far. Must not be `NULL`.
+ * @param reported       Messages of earlier jobs, appended to the report. Must not be `NULL`.
  * @param reported_count Number of entries in `reported`.
- * @param message        Candidate message. Must not be `NULL`.
- * @return `true` when an identical message was already reported.
+ * @param messages       Candidate job's messages.
+ * @param attribution    Text that starts a job's own name at the end of a line, or empty for none.
+ * @return `true` when an earlier job's messages are the same, line for line, up to each line's
+ *         attribution.
  */
-static bool is_reported_message(const char* const* reported,
-                                size_t reported_count,
-                                const char* message) __attribute__((nonnull(1, 3)));
+static bool is_reported_message(const struct Str* reported,
+                                ptrdiff_t reported_count,
+                                struct Str messages,
+                                struct Str attribution) __attribute__((nonnull(1)));
 
 /**
- * @brief Appends one diagnostic to a phase's collected error text as its own line.
+ * @brief Reports whether two jobs' messages are the same, line for line, up to each line's
+ *        attribution. A step of `is_reported_message`.
  *
- * A newline is written only when `buffer` already holds text, so the collection never starts with a
- * blank line.
- *
- * @param buffer  Growable collection of phase diagnostics. Must not be `NULL`.
- * @param message Terminated message to append. Must not be `NULL`.
- * @return `0` when the message was appended, or `-1` on allocation failure, leaving `buffer`
- *         unchanged.
+ * @param reported    Messages of an earlier job, each line ending in `\n`.
+ * @param messages    Candidate job's messages, each line ending in `\n`.
+ * @param attribution Text that starts a job's own name at the end of a line, or empty for none.
+ * @return `true` when both have the same number of lines and each pair agrees.
  */
-static int append_error(struct StringBuffer* buffer, const char* message)
-    __attribute__((nonnull(1, 2)));
+static bool is_reported_message_same(struct Str reported,
+                                     struct Str messages,
+                                     struct Str attribution);
 
-int job_run(size_t job_count,
-            size_t worker_count,
+/**
+ * @brief Returns `line` up to the last `attribution` in it, or all of it when there is none.
+ *
+ * @param line        One line, without its `\n`.
+ * @param attribution Text to look for. Empty finds nothing.
+ * @return The part of `line` before its attribution.
+ */
+static struct Str line_cause(struct Str line, struct Str attribution);
+
+int job_run(ptrdiff_t job_count,
+            ptrdiff_t worker_count,
+            struct JobArenas* worker_arenas,
             JobFn job_fn,
             void* userdata,
-            const char* phase_label,
+            struct Str phase_label,
+            struct Str attribution,
             bool is_verbose,
-            struct StringBuffer* error_out) {
+            struct Os* os,
+            struct Arena scratch,
+            struct Log* log) {
+  assert(job_count >= 0);
+  assert(worker_count > 0);
   struct JobSet jobs = {
       .count = job_count,
+      .worker_arenas = worker_arenas,
       .job_fn = job_fn,
       .userdata = userdata,
       .phase_label = phase_label,
+      .attribution = attribution,
       .is_verbose = is_verbose,
+      .os = os,
   };
   atomic_init(&jobs.completed_count, 0);
-  jobs.errors = calloc(job_count, sizeof(*jobs.errors));
-  if (jobs.errors == NULL && job_count > 0) {
-    (void)append_error(error_out, "out of memory allocating job error slots");
-    return -1;
-  }
+  jobs.logs = arena_new(&scratch, job_count, struct Log);
 
-  const int pool_rc = pool_run(job_count, worker_count, run_one_job, &jobs);
+  jobs.worker_log_arenas = job_run_split_worker_logs(&scratch, worker_count);
+  const int pool_rc = pool_run(job_count, worker_count, job_run_one, &jobs, scratch);
+  // `pool_run` leaves `pthread_create`'s error in `errno` when no worker started, so it is read
+  // before a print below can change it.
+  const int pool_error = errno;
 
   // `pool_run` joins every worker before returning, and that join is the happens-before edge that
-  // publishes each job's writes to its own error slot. Everything below therefore runs with no
-  // worker alive. The slot reads need no atomics. The `stderr` write needs no `flockfile`, and a
-  // version of this that read the slots before the join would be a data race.
+  // publishes each job's writes to its own log. Everything below therefore runs with no worker
+  // alive. The log reads need no atomics. The print needs no lock, and a version of this that read
+  // the logs before the join would be a data race.
 
   // Close the progress line before any later status lines.
   if (is_verbose && job_count > 0) {
-    (void)fputc('\n', stderr);
+    (void)os_print(os, 2, S("\n"));
   }
-  const int rc = run_report_errors(&jobs, pool_rc, error_out);
-  free(jobs.errors);
-  return rc;
+  // A started worker runs every job, so no finished job means no worker started, a failure that no
+  // job's log can explain.
+  if (pool_rc != 0 && atomic_load(&jobs.completed_count) == 0) {
+    char message[ERROR_SYSTEM_MESSAGE_SIZE];
+    return log_error(log, "%.*s: cannot start worker thread: %s", STR_FMT(phase_label),
+                     error_system_message(message, sizeof(message), pool_error));
+  }
+  return job_run_report_errors(&jobs, pool_rc, log);
 }
 
-void job_set_error(struct JobSet* jobs, size_t index, const char* fmt, ...) {
-  if (index >= jobs->count || jobs->errors[index][0] != '\0') {
-    return;
+static struct Arena* job_run_split_worker_logs(struct Arena* arena, ptrdiff_t worker_count) {
+  // Each worker's logs get an equal share of the region, carved off before the pool's own
+  // bookkeeping, so no two workers and no worker and the pool grow into the same bytes.
+  struct Arena* worker_logs = arena_new(arena, worker_count, struct Arena);
+  const char* arena_end = arena->limit != NULL ? arena->limit : arena->end;
+  const ptrdiff_t share_len = (arena_end - arena->beg) / (worker_count + 1);
+  for (ptrdiff_t i = 0; i < worker_count; i++) {
+    worker_logs[i] = arena_split(arena, share_len);
   }
-
-  // This is first-wins, like the other error latches (`record_error` and `render_fail`). The first
-  // message names the cause. A later one is generally a consequence and must not replace it.
-  va_list ap;
-  va_start(ap, fmt);
-  // This goes through `error_report_va` rather than `vsnprintf` directly, so it marks an over-long
-  // message as truncated. These messages compose a callee's whole diagnostic with a source path
-  // into one `ERROR_MESSAGE_SIZE` buffer, so they are the ones most likely to be cut. An unmarked
-  // cut leaves a path that reads as complete and names no existing file.
-  error_report_va(jobs->errors[index], sizeof(jobs->errors[index]), fmt, ap);
-  va_end(ap);
+  return worker_logs;
 }
 
-static int run_one_job(size_t index, void* userdata) {
+static int job_run_one(ptrdiff_t index, ptrdiff_t worker, void* userdata) {
   struct JobSet* jobs = userdata;
-  const int rc = jobs->job_fn(jobs, index, jobs->userdata);
-  const size_t completed =
-      atomic_fetch_add_explicit(&jobs->completed_count, 1, memory_order_relaxed) + 1;
+  struct Log* log = &jobs->logs[index];
+  *log = (struct Log){.buf = {.arena = &jobs->worker_log_arenas[worker]}};
+  const int rc = jobs->job_fn(index, &jobs->worker_arenas[worker], log, jobs->userdata);
   if (jobs->is_verbose) {
-    // Progress is best-effort. A full or closed `stderr` must not fail a phase whose jobs
-    // succeeded, so both write results are discarded. The flush is required because a progress line
-    // ends in `\r` rather than a newline and `stderr` may be line-buffered. It stays inside the
-    // lock, so no other worker's line can land between the write and its flush.
-    flockfile(stderr);
-    (void)fprintf(stderr, "\r%s %zu/%zu", jobs->phase_label, completed, jobs->count);
-    (void)fflush(stderr);
-    funlockfile(stderr);
+    job_run_one_print_progress(jobs, worker);
+  } else {
+    (void)atomic_fetch_add_explicit(&jobs->completed_count, 1, memory_order_relaxed);
   }
   return rc;
 }
 
-static int run_report_errors(const struct JobSet* jobs,
-                             int pool_rc,
-                             struct StringBuffer* error_out) {
-  // Report each distinct message once rather than the first twenty slots. One systematic failure --
-  // a template that cannot parse, an unreadable shared input -- fails every job with the same text,
-  // and capping by slot spends the whole budget on twenty copies of one line. Deduplicating means
-  // the report names every different cause it saw, and the remainder below still carries the true
-  // scale.
-  const char* reported[JOB_ERROR_REPORT_COUNT_MAX] = {NULL};
-  size_t failure_count = 0;
-  size_t reported_count = 0;
-  for (size_t i = 0; i < jobs->count; i++) {
-    const char* message = jobs->errors[i];
-    if (message[0] == '\0') {
+static void job_run_one_print_progress(struct JobSet* jobs, ptrdiff_t worker) {
+  // Workers finish jobs at once, so the line is formatted whole and printed in one call under a
+  // lock of its own. `os_print` retries a short write, and the lock keeps another worker's line
+  // from landing between two parts of one. The count is taken under the same lock, so the lines
+  // print in count order and the last one names every job. The line goes in the worker's scratch
+  // region, which the job that just ended left as it found it.
+  static pthread_mutex_t progress_lock = PTHREAD_MUTEX_INITIALIZER;
+  struct Arena scratch = jobs->worker_arenas[worker].scratch;
+  struct Buf line = {.arena = &scratch};
+  (void)pthread_mutex_lock(&progress_lock);
+  const ptrdiff_t completed =
+      atomic_fetch_add_explicit(&jobs->completed_count, 1, memory_order_relaxed) + 1;
+  buf_printf(&line, "\r%.*s %td/%td", STR_FMT(jobs->phase_label), completed, jobs->count);
+  // Progress is best-effort. A full or closed `stderr` must not fail a phase whose jobs succeeded,
+  // so the print's result is discarded.
+  (void)os_print(jobs->os, 2, buf_str(&line));
+  (void)pthread_mutex_unlock(&progress_lock);
+}
+
+static int job_run_report_errors(const struct JobSet* jobs, int pool_rc, struct Log* log) {
+  // Report each distinct job once rather than the first twenty that failed. One systematic failure
+  // -- a template that cannot parse, an unreadable shared input -- fails every job with the same
+  // text, and capping by job spends the whole budget on twenty copies of one line. Deduplicating
+  // means the report names every different cause it saw, and the remainder below still carries the
+  // true scale. A job's messages are compared as a whole, because a job that failed several ways
+  // says so in one block. Each line compares only up to the job's own name, so a cause that every
+  // job attributes to itself still collapses into one.
+  struct Str reported[JOB_ERROR_REPORT_COUNT_MAX] = {{0}};
+  ptrdiff_t failure_count = 0;
+  ptrdiff_t reported_count = 0;
+  for (ptrdiff_t i = 0; i < jobs->count; i++) {
+    const struct Log* job_log = &jobs->logs[i];
+    if (job_log->errors == 0) {
       continue;
     }
     failure_count++;
-    if (is_reported_message(reported, reported_count, message)) {
+    const struct Str messages = buf_str(&job_log->buf);
+    if (reported_count == JOB_ERROR_REPORT_COUNT_MAX ||
+        is_reported_message(reported, reported_count, messages, jobs->attribution)) {
+      // The error still counts, so the caller's check of `errors` sees every failed job.
+      log->errors += job_log->errors;
       continue;
     }
-    if (reported_count == JOB_ERROR_REPORT_COUNT_MAX) {
-      continue;
-    }
-    if (append_error(error_out, message) != 0) {
-      return -1;
-    }
-    // The slots are stable after the join, so borrowing each message is enough to compare against.
-    reported[reported_count] = message;
+    log_append(log, job_log);
+    // The logs are stable after the join, so a view of each is enough to compare against.
+    reported[reported_count] = messages;
     reported_count++;
   }
 
   if (failure_count > reported_count) {
-    char summary[ERROR_MESSAGE_SIZE];
-    error_report(summary, sizeof(summary), "\xE2\x80\xA6 and %zu more failures",
-                 failure_count - reported_count);
-    if (append_error(error_out, summary) != 0) {
-      return -1;
-    }
+    // This summarizes errors already counted, so it is not one itself.
+    buf_printf(&log->buf, "\xE2\x80\xA6 and %td more failures\n", failure_count - reported_count);
   }
 
-  if (pool_rc != 0) {
-    // `pool_run` can fail before any job records a per-slot diagnostic (e.g. no worker thread could
-    // be started), so append a generic message rather than failing silently at the command
-    // boundary.
+  if (pool_rc != 0 || failure_count > 0) {
+    // A job can fail without recording an error, so record a generic one rather than failing
+    // silently at the command boundary.
     if (failure_count == 0) {
-      char message[ERROR_MESSAGE_SIZE];
-      error_report(message, sizeof(message), "%s failed without a diagnostic", jobs->phase_label);
-      if (append_error(error_out, message) != 0) {
-        return -1;
-      }
+      (void)log_error(log, "%.*s failed without a diagnostic", STR_FMT(jobs->phase_label));
     }
     return -1;
   }
   return 0;
 }
 
-static bool is_reported_message(const char* const* reported,
-                                size_t reported_count,
-                                const char* message) {
-  for (size_t i = 0; i < reported_count; i++) {
-    if (strcmp(reported[i], message) == 0) {
+static bool is_reported_message(const struct Str* reported,
+                                ptrdiff_t reported_count,
+                                struct Str messages,
+                                struct Str attribution) {
+  for (ptrdiff_t i = 0; i < reported_count; i++) {
+    if (is_reported_message_same(reported[i], messages, attribution)) {
       return true;
     }
   }
   return false;
 }
 
-static int append_error(struct StringBuffer* buffer, const char* message) {
-  // Reserve the separator and the message together so a failure leaves the buffer unchanged rather
-  // than ending it with a dangling newline. Both appends below then fit the reserved capacity.
-  const size_t separator_len = buffer->len > 0 ? 1 : 0;
-  if (string_buffer_reserve(buffer, separator_len + strlen(message)) != 0) {
-    return -1;
+static bool is_reported_message_same(struct Str reported,
+                                     struct Str messages,
+                                     struct Str attribution) {
+  while (reported.len > 0 && messages.len > 0) {
+    const struct StrCut reported_line = str_cut(reported, '\n');
+    const struct StrCut messages_line = str_cut(messages, '\n');
+    if (!str_eq(line_cause(reported_line.head, attribution),
+                line_cause(messages_line.head, attribution))) {
+      return false;
+    }
+    reported = reported_line.tail;
+    messages = messages_line.tail;
   }
-  if (separator_len > 0 && string_buffer_append_char(buffer, '\n') != 0) {
-    return -1;
+  return reported.len == 0 && messages.len == 0;
+}
+
+static struct Str line_cause(struct Str line, struct Str attribution) {
+  if (attribution.len == 0) {
+    return line;
   }
-  return string_buffer_append(buffer, message);
+  for (ptrdiff_t i = line.len - attribution.len; i >= 0; i--) {
+    if (str_startswith(str_tail(line, i), attribution)) {
+      return str_head(line, i);
+    }
+  }
+  return line;
 }

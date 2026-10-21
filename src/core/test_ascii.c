@@ -2,9 +2,10 @@
 
 #include "core/ascii.h"
 
-// `ascii_is_digit` answers for `[0-9]` and nothing else, asserted at both edges. Only `parse_size`
-// re-checks the byte afterwards by handing it to `strtoull`. `parse_duration_ms` in `video.c` does
-// not: widening the set would let it accumulate a non-digit byte of `ffprobe` output as a digit.
+// `ascii_is_digit` answers for `[0-9]` and nothing else, asserted at both edges. No caller
+// re-checks the byte afterwards: widening the set would change which values `parse_size` accepts,
+// and would let `parse_duration_ms` in `video.c` accumulate a non-digit byte of `ffprobe` output as
+// a digit.
 static void test_is_digit_accepts_only_ascii_digits(void) {
   TEST_CHECK(ascii_is_digit('0'));
   TEST_CHECK(ascii_is_digit('5'));
@@ -21,10 +22,9 @@ static void test_is_digit_accepts_only_ascii_digits(void) {
 
 // `ascii_is_alphanumeric` answers for `[0-9A-Za-z]` and nothing else, asserted at every edge of the
 // three ranges. This predicate defines the alphanumeric accept set of `text_is_safe_identifier`,
-// `path_is_safe_relative` and `is_derivative_name`, the pass-through set of `text_slugify`, and the
-// unencoded set of `is_url_literal` in `media_item.c`, so widening it by one byte silently changes
-// which identifiers, output paths and derivative names are accepted, which slugs a build generates,
-// and which bytes a media URL leaves unencoded. An album directory named `Album_Name` publishes
+// `path_is_safe_relative` and `is_derivative_name`, and the pass-through set of `text_slugify`, so
+// widening it by one byte silently changes which identifiers, output paths and derivative names are
+// accepted, and which slugs a build generates. An album directory named `Album_Name` publishes
 // under the slug `album-name`. An added `'_'` would change that to `album_name`.
 static void test_is_alnum_accepts_only_letters_and_digits(void) {
   TEST_CHECK(ascii_is_alphanumeric('0'));
@@ -79,8 +79,8 @@ static void test_is_space_accepts_only_ascii_whitespace(void) {
 
 // `ascii_to_lower` folds `[A-Z]` and returns every other byte unchanged. Slugs, URL schemes, file
 // suffixes, and manifest keys all use this exact locale-independent fold, through `text_slugify`,
-// `skip_scheme`, `media_item_has_extension` and `has_suffix` in `fs.c`, and `manifest_equal_bytes`
-// with `manifest_hash_bytes`. `skip_scheme` folds both the URL byte and the scheme byte before
+// `has_scheme`, `media_item_has_extension` and `has_suffix` in `walk.c`, and `is_path_equal_folded`
+// with `hash_path_folded`. `has_scheme` folds both the URL byte and the scheme byte before
 // comparing, and a fold that set bit 0x20 unconditionally would make the control byte 0x1A compare
 // equal to ':' and 0x0F equal to '/'. A scheme-less `base_url` spelled with those control bytes
 // would then pass as absolute. The high-byte case pins the rule that bytes outside ASCII never

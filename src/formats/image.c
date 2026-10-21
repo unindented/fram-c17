@@ -5,7 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "core/error.h"
+#include "shared/arena.h"
+#include "shared/buf.h"
+#include "shared/log.h"
+#include "shared/str.h"
 #include "stb_image.h"
 #include "stb_image_resize2.h"
 #include "stb_image_write.h"
@@ -25,22 +28,20 @@ struct OrientationTransform {
   bool is_mirrored_y;
 };
 
-/** Accumulates the chunks emitted by stb's callback JPEG encoder. */
+/** Collects the chunks stb's callback JPEG encoder emits into one bounded buffer. */
 struct JpegOutput {
-  /** Encoded bytes, grown with `realloc` and handed to the caller on success. */
-  unsigned char* data;
-
-  /** Bytes written so far, never above `IMAGE_ENCODED_LEN_MAX`. */
-  size_t len;
-
-  /** Bytes allocated at `data`. It doubles until it reaches `IMAGE_ENCODED_LEN_MAX`. */
-  size_t capacity;
-
-  /** Latched when growing `data` failed. Later chunks are then dropped instead of appended. */
-  bool has_allocation_failed;
+  /** Bytes taken so far, never more than `IMAGE_ENCODED_LEN_MAX`. */
+  struct Buf buf;
 
   /**
-   * Latched when a chunk would push `len` past `IMAGE_ENCODED_LEN_MAX`. Later chunks are dropped.
+   * Bytes stb emitted so far. Once they pass `IMAGE_ENCODED_LEN_MAX`, later chunks are only
+   * counted, so the error can name the whole encoded length.
+   */
+  ptrdiff_t len;
+
+  /**
+   * Latched when a chunk would push `len` past `IMAGE_ENCODED_LEN_MAX`. That chunk and every later
+   * one are dropped.
    */
   bool has_exceeded_limit;
 };
@@ -56,46 +57,46 @@ static const struct OrientationTransform orientation_transforms[] = {
     [IMAGE_ORIENTATION_LEFT_BOTTOM] = {true, true, false},
 };
 
-_Static_assert((size_t)IMAGE_DIMENSION_MAX <= SIZE_MAX / (size_t)IMAGE_DIMENSION_MAX,
-               "image dimension square must fit in size_t");
-_Static_assert(IMAGE_PIXEL_COUNT_MAX <= SIZE_MAX / IMAGE_CHANNEL_COUNT,
-               "image byte bound must fit in size_t");
+_Static_assert((ptrdiff_t)IMAGE_DIMENSION_MAX <= PTRDIFF_MAX / (ptrdiff_t)IMAGE_DIMENSION_MAX,
+               "image dimension square must fit in ptrdiff_t");
+_Static_assert(IMAGE_PIXEL_COUNT_MAX <= PTRDIFF_MAX / IMAGE_CHANNEL_COUNT,
+               "image byte bound must fit in ptrdiff_t");
+
+/**
+ * Where an operation reports its failure: the caller's operation, which leads the message, the file
+ * it trails with, and the log, as in
+ * `failed to probe media: failed to probe JPEG: Corrupt JPEG ('photos/a.jpg')`.
+ */
+struct ImageReport {
+  /** Operation the caller was performing, such as `failed to probe media`. */
+  struct Str operation;
+
+  /** File the bytes were read from or are written to. */
+  struct Str file_path;
+
+  /** Log that receives the message. */
+  struct Log* log;
+};
 
 /**
  * @brief Checks dimensions against the image limits.
  *
- * @param width_px   Width to check.
- * @param height_px  Height to check.
- * @param reason     Destination for a failure diagnostic.
- * @param reason_len Size of `reason` in bytes.
+ * @param width_px  Width to check.
+ * @param height_px Height to check.
+ * @param report    Where a failure is reported. Must not be `NULL`.
  * @return `0` when the dimensions are valid, or `-1` otherwise.
  */
-static int validate_dimensions(size_t width_px, size_t height_px, char* reason, size_t reason_len);
-
-/**
- * @brief Checks an image's dimensions and pixel storage.
- *
- * @param image      Image to check. Must not be `NULL`.
- * @param reason     Destination for a failure diagnostic.
- * @param reason_len Size of `reason` in bytes.
- * @return `0` when the image is valid, or `-1` otherwise.
- */
-static int validate_image(const struct Image* image, char* reason, size_t reason_len)
-    __attribute__((nonnull(1)));
-
-/**
- * @brief Returns whether an orientation is one of the eight EXIF values.
- *
- * @param orientation Orientation to check.
- * @return `true` for a defined orientation, or `false` otherwise.
- */
-static bool is_orientation_valid(enum ImageOrientation orientation);
+static int validate_dimensions(ptrdiff_t width_px,
+                               ptrdiff_t height_px,
+                               const struct ImageReport* report) __attribute__((nonnull(3)));
 
 /**
  * @brief Appends one encoder chunk to a bounded JPEG output.
  *
- * stb's callback cannot signal failure. This function latches a failure and ignores later chunks,
- * bounding retained memory even though stb finishes its current encode.
+ * stb's callback cannot signal failure. This function latches an output that would exceed
+ * `IMAGE_ENCODED_LEN_MAX` and drops later chunks, bounding the buffer even though stb finishes its
+ * current encode. Past the limit it still counts each chunk, so the error names the whole encoded
+ * length.
  *
  * @param context `struct JpegOutput` receiving the chunk. Must not be `NULL`.
  * @param data    Chunk bytes. Must not be `NULL` when `size` is positive.
@@ -103,111 +104,94 @@ static bool is_orientation_valid(enum ImageOrientation orientation);
  */
 static void jpeg_write(void* context, void* data, int size) __attribute__((nonnull(1)));
 
-int image_probe(const unsigned char* data,
-                size_t data_len,
-                size_t* width_out,
-                size_t* height_out,
-                char* reason,
-                size_t reason_len) {
-  if (data_len > IMAGE_INPUT_LEN_MAX) {
-    return error_report(reason, reason_len,
-                        "JPEG input exceeds max JPEG input length (%d bytes) at %zu bytes",
-                        IMAGE_INPUT_LEN_MAX, data_len);
+int image_probe(struct Str data,
+                ptrdiff_t* width_out,
+                ptrdiff_t* height_out,
+                struct Str operation,
+                struct Str file_path,
+                struct Log* log) {
+  const struct ImageReport report = {operation, file_path, log};
+  if (data.len > IMAGE_INPUT_LEN_MAX) {
+    return log_error(
+        log, "%.*s: JPEG input exceeds max JPEG input length (%d bytes) at %td bytes ('%.*s')",
+        STR_FMT(operation), IMAGE_INPUT_LEN_MAX, data.len, STR_FMT(file_path));
   }
 
   // stb's JPEG header parser rejects a zero width or height, and both are 16-bit fields, so a
   // successful probe always reports positive dimensions.
   int width = 0;
   int height = 0;
-  if (stbi_info_from_memory(data, (int)data_len, &width, &height, NULL) == 0) {
+  if (stbi_info_from_memory((const unsigned char*)data.data, (int)data.len, &width, &height,
+                            NULL) == 0) {
     const char* failure = stbi_failure_reason();
-    return error_report(reason, reason_len, "failed to probe JPEG: %s",
-                        failure == NULL ? "unknown stb_image error" : failure);
+    return log_error(log, "%.*s: failed to probe JPEG: %s ('%.*s')", STR_FMT(operation),
+                     failure == NULL ? "unknown stb_image error" : failure, STR_FMT(file_path));
   }
-  if (validate_dimensions((size_t)width, (size_t)height, reason, reason_len) != 0) {
+  if (validate_dimensions(width, height, &report) != 0) {
     return -1;
   }
 
-  *width_out = (size_t)width;
-  *height_out = (size_t)height;
+  *width_out = width;
+  *height_out = height;
   return 0;
 }
 
-int image_decode(const unsigned char* data,
-                 size_t data_len,
-                 size_t width_hint,
-                 size_t height_hint,
+int image_decode(struct Str data,
                  struct Image* image_out,
-                 char* reason,
-                 size_t reason_len) {
+                 struct Str operation,
+                 struct Str file_path,
+                 struct Log* log) {
   *image_out = (struct Image){0};
 
   // Reject hostile dimensions before stb allocates the full pixel buffer. Validating only the
   // dimensions returned by `stbi_load_from_memory` would enforce the model after its peak-memory
   // bound had already been lost. The probe also applies the input length limit. The decode below
   // parses the same header, so it reports the dimensions the probe validated.
-  size_t width_probed = 0;
-  size_t height_probed = 0;
-  if (image_probe(data, data_len, &width_probed, &height_probed, reason, reason_len) != 0) {
+  ptrdiff_t width_probed = 0;
+  ptrdiff_t height_probed = 0;
+  if (image_probe(data, &width_probed, &height_probed, operation, file_path, log) != 0) {
     return -1;
   }
-
-  // stb always decodes the full JPEG. Keeping these hints at the boundary allows a future scaled
-  // decoder to reduce peak memory without changing its callers.
-  (void)width_hint;
-  (void)height_hint;
 
   int width = 0;
   int height = 0;
-  unsigned char* pixels =
-      stbi_load_from_memory(data, (int)data_len, &width, &height, NULL, IMAGE_CHANNEL_COUNT);
+  unsigned char* pixels = stbi_load_from_memory((const unsigned char*)data.data, (int)data.len,
+                                                &width, &height, NULL, IMAGE_CHANNEL_COUNT);
   if (pixels == NULL) {
     const char* failure = stbi_failure_reason();
-    return error_report(reason, reason_len, "failed to decode JPEG: %s",
-                        failure == NULL ? "unknown stb_image error" : failure);
+    return log_error(log, "%.*s: failed to decode JPEG: %s ('%.*s')", STR_FMT(operation),
+                     failure == NULL ? "unknown stb_image error" : failure, STR_FMT(file_path));
   }
 
   image_out->pixels = pixels;
-  image_out->width_px = (size_t)width;
-  image_out->height_px = (size_t)height;
+  image_out->width_px = width;
+  image_out->height_px = height;
   return 0;
 }
 
-int image_orient(struct Image* image,
-                 enum ImageOrientation orientation,
-                 char* reason,
-                 size_t reason_len) {
-  if (validate_image(image, reason, reason_len) != 0) {
-    return -1;
-  }
-  if (!is_orientation_valid(orientation)) {
-    return error_report(reason, reason_len, "invalid image orientation: %d", (int)orientation);
-  }
+void image_orient(struct Image* image, enum ImageOrientation orientation) {
   if (orientation == IMAGE_ORIENTATION_TOP_LEFT) {
-    return 0;
+    return;
   }
 
-  size_t width_out = 0;
-  size_t height_out = 0;
+  ptrdiff_t width_out = 0;
+  ptrdiff_t height_out = 0;
   image_orient_size(orientation, image->width_px, image->height_px, &width_out, &height_out);
-  unsigned char* pixels = malloc(width_out * height_out * IMAGE_CHANNEL_COUNT);
-  if (pixels == NULL) {
-    return error_report(reason, reason_len, "out of memory orienting image");
-  }
+  unsigned char* pixels = image_alloc((size_t)(width_out * height_out * IMAGE_CHANNEL_COUNT));
 
   const struct OrientationTransform transform = orientation_transforms[orientation];
-  for (size_t y = 0; y < height_out; y++) {
-    for (size_t x = 0; x < width_out; x++) {
-      size_t source_x = transform.is_transposed ? y : x;
-      size_t source_y = transform.is_transposed ? x : y;
+  for (ptrdiff_t y = 0; y < height_out; y++) {
+    for (ptrdiff_t x = 0; x < width_out; x++) {
+      ptrdiff_t source_x = transform.is_transposed ? y : x;
+      ptrdiff_t source_y = transform.is_transposed ? x : y;
       if (transform.is_mirrored_x) {
         source_x = image->width_px - 1 - source_x;
       }
       if (transform.is_mirrored_y) {
         source_y = image->height_px - 1 - source_y;
       }
-      const size_t source_offset = (source_y * image->width_px + source_x) * IMAGE_CHANNEL_COUNT;
-      const size_t output_offset = (y * width_out + x) * IMAGE_CHANNEL_COUNT;
+      const ptrdiff_t source_offset = (source_y * image->width_px + source_x) * IMAGE_CHANNEL_COUNT;
+      const ptrdiff_t output_offset = (y * width_out + x) * IMAGE_CHANNEL_COUNT;
       memcpy(pixels + output_offset, image->pixels + source_offset, IMAGE_CHANNEL_COUNT);
     }
   }
@@ -216,69 +200,41 @@ int image_orient(struct Image* image,
   image->pixels = pixels;
   image->width_px = width_out;
   image->height_px = height_out;
-  return 0;
-}
-
-int image_resize(const struct Image* image,
-                 size_t width_px,
-                 size_t height_px,
-                 struct Image* image_out,
-                 char* reason,
-                 size_t reason_len) {
-  return image_resize_region(image, 0, 0, image->width_px, image->height_px, width_px, height_px,
-                             image_out, reason, reason_len);
 }
 
 int image_resize_region(const struct Image* image,
-                        size_t source_x_px,
-                        size_t source_y_px,
-                        size_t source_width_px,
-                        size_t source_height_px,
-                        size_t width_px,
-                        size_t height_px,
+                        ptrdiff_t source_x_px,
+                        ptrdiff_t source_y_px,
+                        ptrdiff_t source_width_px,
+                        ptrdiff_t source_height_px,
+                        ptrdiff_t width_px,
+                        ptrdiff_t height_px,
                         struct Image* image_out,
-                        char* reason,
-                        size_t reason_len) {
+                        struct Str operation,
+                        struct Str file_path,
+                        struct Log* log) {
   *image_out = (struct Image){0};
-  if (validate_image(image, reason, reason_len) != 0 ||
-      validate_dimensions(source_width_px, source_height_px, reason, reason_len) != 0 ||
-      validate_dimensions(width_px, height_px, reason, reason_len) != 0) {
-    return -1;
-  }
-  if (source_x_px > image->width_px || source_width_px > image->width_px - source_x_px ||
-      source_y_px > image->height_px || source_height_px > image->height_px - source_y_px) {
-    return error_report(reason, reason_len,
-                        "image crop is outside source dimensions: %zu,%zu %zu x %zu in %zu x %zu",
-                        source_x_px, source_y_px, source_width_px, source_height_px,
-                        image->width_px, image->height_px);
-  }
+  const ptrdiff_t row_len = width_px * IMAGE_CHANNEL_COUNT;
+  const ptrdiff_t output_stride = (row_len + 3) / 4 * 4;
+  const ptrdiff_t allocation_len = output_stride * height_px;
+  unsigned char* pixels = image_alloc((size_t)allocation_len);
 
-  const size_t row_len = width_px * IMAGE_CHANNEL_COUNT;
-  const size_t output_stride = (row_len + 3) / 4 * 4;
-  const size_t data_len = row_len * height_px;
-  const size_t allocation_len = output_stride * height_px;
-  if (data_len == 0) {
-    return error_report(reason, reason_len, "resized image has no pixels");
-  }
-  unsigned char* pixels = malloc(allocation_len);
-  if (pixels == NULL) {
-    return error_report(reason, reason_len, "out of memory resizing image");
-  }
-
-  const size_t source_offset = (source_y_px * image->width_px + source_x_px) * IMAGE_CHANNEL_COUNT;
-  const size_t source_stride = image->width_px * IMAGE_CHANNEL_COUNT;
+  const ptrdiff_t source_offset =
+      (source_y_px * image->width_px + source_x_px) * IMAGE_CHANNEL_COUNT;
+  const ptrdiff_t source_stride = image->width_px * IMAGE_CHANNEL_COUNT;
   if (stbir_resize_uint8_srgb(image->pixels + source_offset, (int)source_width_px,
                               (int)source_height_px, (int)source_stride, pixels, (int)width_px,
                               (int)height_px, (int)output_stride, STBIR_RGB) == NULL) {
     free(pixels);
-    return error_report(reason, reason_len, "failed to resize image");
+    return log_error(log, "%.*s: failed to resize image ('%.*s')", STR_FMT(operation),
+                     STR_FMT(file_path));
   }
   // stb's fast 8-bit encoder uses aligned integer stores. Padding every output row to four bytes
   // keeps those stores aligned for RGB widths whose natural stride is not divisible by four. Move
   // rows forward into the public tightly packed representation after the resize.
   if (output_stride != row_len) {
-    for (size_t y = 1; y < height_px; y++) {
-      memmove(pixels + y * row_len, pixels + y * output_stride, row_len);
+    for (ptrdiff_t y = 1; y < height_px; y++) {
+      memmove(pixels + y * row_len, pixels + y * output_stride, (size_t)row_len);
     }
   }
 
@@ -289,50 +245,39 @@ int image_resize_region(const struct Image* image,
 }
 
 int image_encode_jpeg(const struct Image* image,
-                      size_t quality,
-                      unsigned char** data_out,
-                      size_t* data_len_out,
-                      char* reason,
-                      size_t reason_len) {
-  *data_out = NULL;
-  *data_len_out = 0;
-  if (validate_image(image, reason, reason_len) != 0) {
-    return -1;
-  }
-  if (quality < 1 || quality > 100) {
-    return error_report(reason, reason_len, "JPEG quality must be from 1 through 100: %zu",
-                        quality);
-  }
-
-  struct JpegOutput output = {0};
+                      ptrdiff_t quality,
+                      struct Arena* perm,
+                      struct Str* jpeg_out,
+                      struct Str operation,
+                      struct Str file_path,
+                      struct Log* log) {
+  // The bytes grow in a copy of `perm`, which is published only on success.
+  struct Arena arena = *perm;
+  struct JpegOutput output = {.buf = {.arena = &arena}};
   const int is_encoded =
       stbi_write_jpg_to_func(jpeg_write, &output, (int)image->width_px, (int)image->height_px,
                              IMAGE_CHANNEL_COUNT, image->pixels, (int)quality);
   if (output.has_exceeded_limit) {
-    free(output.data);
-    return error_report(reason, reason_len, "JPEG output exceeds max encoded length (%d bytes)",
-                        IMAGE_ENCODED_LEN_MAX);
-  }
-  if (output.has_allocation_failed) {
-    free(output.data);
-    return error_report(reason, reason_len, "out of memory encoding JPEG");
+    return log_error(log,
+                     "%.*s: JPEG output exceeds max encoded length (%d bytes) at %td bytes "
+                     "('%.*s')",
+                     STR_FMT(operation), IMAGE_ENCODED_LEN_MAX, output.len, STR_FMT(file_path));
   }
   if (is_encoded == 0 || output.len == 0) {
-    free(output.data);
-    return error_report(reason, reason_len, "failed to encode JPEG");
+    return log_error(log, "%.*s: failed to encode JPEG ('%.*s')", STR_FMT(operation),
+                     STR_FMT(file_path));
   }
-
-  *data_out = output.data;
-  *data_len_out = output.len;
+  *perm = arena;
+  *jpeg_out = buf_str(&output.buf);
   return 0;
 }
 
-void image_fit(size_t width_px,
-               size_t height_px,
-               size_t width_px_max,
-               size_t height_px_max,
-               size_t* width_out,
-               size_t* height_out) {
+void image_fit(ptrdiff_t width_px,
+               ptrdiff_t height_px,
+               ptrdiff_t width_px_max,
+               ptrdiff_t height_px_max,
+               ptrdiff_t* width_out,
+               ptrdiff_t* height_out) {
   if (width_px <= width_px_max && height_px <= height_px_max) {
     *width_out = width_px;
     *height_out = height_px;
@@ -354,26 +299,26 @@ void image_fit(size_t width_px,
   }
 }
 
-void image_center_crop(size_t width_px,
-                       size_t height_px,
-                       size_t target_width_px,
-                       size_t target_height_px,
-                       size_t* x_out,
-                       size_t* y_out,
-                       size_t* width_out,
-                       size_t* height_out) {
+void image_center_crop(ptrdiff_t width_px,
+                       ptrdiff_t height_px,
+                       ptrdiff_t width_px_target,
+                       ptrdiff_t height_px_target,
+                       ptrdiff_t* x_out,
+                       ptrdiff_t* y_out,
+                       ptrdiff_t* width_out,
+                       ptrdiff_t* height_out) {
   *x_out = 0;
   *y_out = 0;
   *width_out = width_px;
   *height_out = height_px;
-  if (width_px * target_height_px > height_px * target_width_px) {
-    *width_out = height_px * target_width_px / target_height_px;
+  if (width_px * height_px_target > height_px * width_px_target) {
+    *width_out = height_px * width_px_target / height_px_target;
     if (*width_out == 0) {
       *width_out = 1;
     }
     *x_out = (width_px - *width_out) / 2;
-  } else if (width_px * target_height_px < height_px * target_width_px) {
-    *height_out = width_px * target_height_px / target_width_px;
+  } else if (width_px * height_px_target < height_px * width_px_target) {
+    *height_out = width_px * height_px_target / width_px_target;
     if (*height_out == 0) {
       *height_out = 1;
     }
@@ -382,14 +327,33 @@ void image_center_crop(size_t width_px,
 }
 
 void image_orient_size(enum ImageOrientation orientation,
-                       size_t width_px,
-                       size_t height_px,
-                       size_t* width_out,
-                       size_t* height_out) {
-  const bool is_transposed =
-      is_orientation_valid(orientation) && orientation_transforms[orientation].is_transposed;
+                       ptrdiff_t width_px,
+                       ptrdiff_t height_px,
+                       ptrdiff_t* width_out,
+                       ptrdiff_t* height_out) {
+  const bool is_transposed = orientation_transforms[orientation].is_transposed;
   *width_out = is_transposed ? height_px : width_px;
   *height_out = is_transposed ? width_px : height_px;
+}
+
+void* image_alloc(size_t size) {
+  return image_realloc(NULL, size);
+}
+
+void* image_realloc(void* data, size_t size) {
+  // A zero size frees, as `realloc` may, but explicitly, because what `realloc` returns for it is
+  // implementation-defined.
+  if (size == 0) {
+    free(data);
+    return NULL;
+  }
+  // No object can be larger than `PTRDIFF_MAX`, because a pointer difference inside it would
+  // overflow, so a larger request cannot succeed and is refused before `realloc` sees it.
+  void* result = size <= (size_t)PTRDIFF_MAX ? realloc(data, size) : NULL;
+  if (result == NULL) {
+    os_oom();
+  }
+  return result;
 }
 
 void image_free(struct Image* image) {
@@ -397,63 +361,39 @@ void image_free(struct Image* image) {
   *image = (struct Image){0};
 }
 
-static int validate_dimensions(size_t width_px, size_t height_px, char* reason, size_t reason_len) {
-  if (width_px == 0 || height_px == 0) {
-    return error_report(reason, reason_len, "image dimensions must be positive: %zu x %zu",
-                        width_px, height_px);
+static int validate_dimensions(ptrdiff_t width_px,
+                               ptrdiff_t height_px,
+                               const struct ImageReport* report) {
+  if (width_px <= 0 || height_px <= 0) {
+    return log_error(report->log, "%.*s: image dimensions must be positive: %td x %td ('%.*s')",
+                     STR_FMT(report->operation), width_px, height_px, STR_FMT(report->file_path));
   }
   if (width_px > IMAGE_DIMENSION_MAX || height_px > IMAGE_DIMENSION_MAX) {
-    return error_report(reason, reason_len, "image exceeds max dimension (%d pixels): %zu x %zu",
-                        IMAGE_DIMENSION_MAX, width_px, height_px);
+    return log_error(report->log,
+                     "%.*s: image exceeds max dimension (%d pixels) at %td x %td ('%.*s')",
+                     STR_FMT(report->operation), IMAGE_DIMENSION_MAX, width_px, height_px,
+                     STR_FMT(report->file_path));
   }
   if (width_px > IMAGE_PIXEL_COUNT_MAX / height_px) {
-    return error_report(reason, reason_len, "image exceeds max pixel count (%d pixels): %zu x %zu",
-                        IMAGE_PIXEL_COUNT_MAX, width_px, height_px);
+    return log_error(report->log,
+                     "%.*s: image exceeds max pixel count (%d pixels) at %td x %td ('%.*s')",
+                     STR_FMT(report->operation), IMAGE_PIXEL_COUNT_MAX, width_px, height_px,
+                     STR_FMT(report->file_path));
   }
   return 0;
 }
 
-static int validate_image(const struct Image* image, char* reason, size_t reason_len) {
-  if (image->pixels == NULL) {
-    return error_report(reason, reason_len, "image pixels are missing");
-  }
-  return validate_dimensions(image->width_px, image->height_px, reason, reason_len);
-}
-
-static bool is_orientation_valid(enum ImageOrientation orientation) {
-  return orientation >= IMAGE_ORIENTATION_TOP_LEFT && orientation <= IMAGE_ORIENTATION_LEFT_BOTTOM;
-}
-
 static void jpeg_write(void* context, void* data, int size) {
   struct JpegOutput* output = context;
-  if (output->has_allocation_failed || output->has_exceeded_limit || size <= 0) {
+  if (size <= 0) {
     return;
   }
-  const size_t chunk_len = (size_t)size;
-  if (chunk_len > IMAGE_ENCODED_LEN_MAX - output->len) {
+  if (output->has_exceeded_limit || size > IMAGE_ENCODED_LEN_MAX - output->len) {
     output->has_exceeded_limit = true;
+    // The count saturates instead of wrapping when the output is too large for a `ptrdiff_t`.
+    output->len = size > PTRDIFF_MAX - output->len ? PTRDIFF_MAX : output->len + size;
     return;
   }
-
-  const size_t len_next = output->len + chunk_len;
-  if (len_next > output->capacity) {
-    size_t capacity_next = output->capacity == 0 ? 4096 : output->capacity;
-    while (capacity_next < len_next) {
-      if (capacity_next > IMAGE_ENCODED_LEN_MAX / 2) {
-        capacity_next = IMAGE_ENCODED_LEN_MAX;
-      } else {
-        capacity_next *= 2;
-      }
-    }
-    unsigned char* data_next = realloc(output->data, capacity_next);
-    if (data_next == NULL) {
-      output->has_allocation_failed = true;
-      return;
-    }
-    output->data = data_next;
-    output->capacity = capacity_next;
-  }
-
-  memcpy(output->data + output->len, data, chunk_len);
-  output->len = len_next;
+  buf_append(&output->buf, (struct Str){data, size});
+  output->len += size;
 }

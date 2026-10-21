@@ -4,6 +4,7 @@
 #include <acutest.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -27,9 +28,9 @@
  */
 static enum ExitCode run_config_capturing(const char* root_dir,
                                           char* stdout_out,
-                                          size_t stdout_out_len,
+                                          ptrdiff_t stdout_out_len,
                                           char* stderr_out,
-                                          size_t stderr_out_len) {
+                                          ptrdiff_t stderr_out_len) {
   stdout_out[0] = '\0';
   stderr_out[0] = '\0';
   int saved_dir_fd = -1;
@@ -43,7 +44,7 @@ static enum ExitCode run_config_capturing(const char* root_dir,
   struct StreamCapture stderr_capture;
   if (capture_begin(stdout, &stdout_capture) == 0) {
     if (capture_begin(stderr, &stderr_capture) == 0) {
-      rc = cmd_config_run();
+      rc = cmd_config_run(os_posix());
       has_plumbing_failed = capture_end(&stderr_capture, stderr_out, stderr_out_len) != 0;
     }
     has_plumbing_failed =
@@ -65,7 +66,7 @@ static enum ExitCode run_config_capturing(const char* root_dir,
  */
 static enum ExitCode run_config_with_unwritable_stdout(const char* root_dir,
                                                        char* stderr_out,
-                                                       size_t stderr_out_len) {
+                                                       ptrdiff_t stderr_out_len) {
   stderr_out[0] = '\0';
   int saved_dir_fd = -1;
   if (working_dir_enter(root_dir, &saved_dir_fd) != 0) {
@@ -78,7 +79,7 @@ static enum ExitCode run_config_with_unwritable_stdout(const char* root_dir,
   struct StreamCapture stderr_capture;
   if (capture_begin_unwritable(stdout, &stdout_capture) == 0) {
     if (capture_begin(stderr, &stderr_capture) == 0) {
-      rc = cmd_config_run();
+      rc = cmd_config_run(os_posix());
       has_plumbing_failed = capture_end(&stderr_capture, stderr_out, stderr_out_len) != 0;
     }
     has_plumbing_failed = capture_end(&stdout_capture, NULL, 0) != 0 || has_plumbing_failed;
@@ -89,9 +90,8 @@ static enum ExitCode run_config_with_unwritable_stdout(const char* root_dir,
 
 // A valid `fram.toml` loads and prints, and the command reports success.
 static void test_prints_loaded_config(void) {
-  char root_dir_template[] = "/tmp/fram-cmd-config.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
+  char root_dir[] = "/tmp/fram-cmd-config.XXXXXX";
+  if (init_fixture_dir(root_dir) != 0) {
     return;
   }
   char stdout_out[8192];
@@ -133,9 +133,8 @@ cleanup:
 // abort here. This is the end-to-end half of the pair: `test_print_empty_template_array` covers the
 // same composition at the module boundary.
 static void test_prints_empty_template_array(void) {
-  char root_dir_template[] = "/tmp/fram-cmd-config-empty.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
+  char root_dir[] = "/tmp/fram-cmd-config-empty.XXXXXX";
+  if (init_fixture_dir(root_dir) != 0) {
     return;
   }
   char stdout_out[8192];
@@ -175,16 +174,15 @@ cleanup:
 // from the running libc rather than hardcoded, so the assertion is the whole claim and stays
 // portable.
 static void test_reports_missing_config(void) {
-  char reason[FS_REASON_SIZE];
-  char expected[ERROR_MESSAGE_SIZE];
+  char reason[ERROR_SYSTEM_MESSAGE_SIZE];
+  char expected[1024];
   const int expected_len =
       snprintf(expected, sizeof(expected), "failed to read config: %s ('fram.toml')\n",
                error_system_message(reason, sizeof(reason), ENOENT));
   TEST_ASSERT(expected_len > 0 && (size_t)expected_len < sizeof(expected));
 
-  char root_dir_template[] = "/tmp/fram-cmd-config-missing.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
+  char root_dir[] = "/tmp/fram-cmd-config-missing.XXXXXX";
+  if (init_fixture_dir(root_dir) != 0) {
     return;
   }
 
@@ -203,9 +201,8 @@ static void test_reports_missing_config(void) {
 // A well-formed `fram.toml` that omits a required key fails, and fails with the missing-key message
 // rather than the wrong-type one. An exact line assertion preserves that distinction.
 static void test_reports_missing_required_key(void) {
-  char root_dir_template[] = "/tmp/fram-cmd-config-invalid.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
+  char root_dir[] = "/tmp/fram-cmd-config-invalid.XXXXXX";
+  if (init_fixture_dir(root_dir) != 0) {
     return;
   }
   char stdout_out[8192];
@@ -224,25 +221,43 @@ cleanup:
   remove_fixture_tree(root_dir);
 }
 
-// A `fram.toml` that loads fine but cannot be written out fails with the stream's own reason,
-// rather than exiting 0 when nobody received the output. This is the command's second documented
-// failure mode, and the reason it reports is what lets the user tell a closed pipe from a full
-// disk. A read-only `/dev/null` on `STDOUT_FILENO` is the deterministic way to reach that failure:
-// the writes fail, `gallery_config_print` reports it. The diagnostic still reaches the captured
-// `stderr`.
-static void test_reports_unwritable_stdout(void) {
-  // `EBADF`: the writes go to a descriptor opened read-only. The reason is derived from the running
-  // libc rather than hardcoded, and the whole line is compared so a reworded prefix fails too.
-  char reason[ERROR_MESSAGE_SIZE];
-  char expected[ERROR_MESSAGE_SIZE * 2];
-  const int expected_len =
-      snprintf(expected, sizeof(expected), "failed to write resolved config to 'stdout': %s\n",
-               error_system_message(reason, sizeof(reason), EBADF));
-  TEST_ASSERT(expected_len > 0 && (size_t)expected_len < sizeof(expected));
+// A `fram.toml` that parses but holds several invalid keys fails, reports every one of them in the
+// order the load checks them, and prints no configuration.
+static void test_reports_every_invalid_key(void) {
+  char root_dir[] = "/tmp/fram-cmd-config-invalid-keys.XXXXXX";
+  if (init_fixture_dir(root_dir) != 0) {
+    return;
+  }
+  char stdout_out[8192];
+  char stderr_out[8192];
+  if (!TEST_CHECK(write_fixture_file(root_dir, "fram.toml",
+                                     "base_url = \"https://example.com\"\n"
+                                     "title = 1\n"
+                                     "author = \"Author Name\"\n"
+                                     "colour = \"blue\"\n"
+                                     "video_frame_seconds = \"ten\"\n") == 0)) {
+    goto cleanup;
+  }
 
-  char root_dir_template[] = "/tmp/fram-cmd-config-unwritable.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
+  TEST_CHECK(run_config_capturing(root_dir, stdout_out, sizeof(stdout_out), stderr_out,
+                                  sizeof(stderr_out)) == EXIT_CODE_FAILURE);
+  TEST_CHECK(strcmp(stderr_out,
+                    "unknown config key 'colour'\n"
+                    "config key 'title' must be a string\n"
+                    "config key 'video_frame_seconds' must be an integer\n") == 0);
+  TEST_MSG("stderr: '%s'", stderr_out);
+  TEST_CHECK(stdout_out[0] == '\0');
+
+cleanup:
+  remove_fixture_tree(root_dir);
+}
+
+// A `fram.toml` that loads fine but cannot be written out fails rather than exiting 0 when nobody
+// received the output. A read-only `/dev/null` on `STDOUT_FILENO` is the deterministic way to reach
+// that failure. Nothing is printed to `stderr`.
+static void test_fails_on_unwritable_stdout(void) {
+  char root_dir[] = "/tmp/fram-cmd-config-unwritable.XXXXXX";
+  if (init_fixture_dir(root_dir) != 0) {
     return;
   }
   char stderr_out[8192];
@@ -254,7 +269,7 @@ static void test_reports_unwritable_stdout(void) {
 
   TEST_CHECK(run_config_with_unwritable_stdout(root_dir, stderr_out, sizeof(stderr_out)) ==
              EXIT_CODE_FAILURE);
-  TEST_CHECK(strcmp(stderr_out, expected) == 0);
+  TEST_CHECK(strcmp(stderr_out, "") == 0);
 
 cleanup:
   remove_fixture_tree(root_dir);
@@ -265,6 +280,7 @@ TEST_LIST = {
     {"prints empty template array", test_prints_empty_template_array},
     {"reports missing config", test_reports_missing_config},
     {"reports missing required key", test_reports_missing_required_key},
-    {"reports unwritable stdout", test_reports_unwritable_stdout},
+    {"reports every invalid key", test_reports_every_invalid_key},
+    {"fails on unwritable stdout", test_fails_on_unwritable_stdout},
     {NULL, NULL},
 };

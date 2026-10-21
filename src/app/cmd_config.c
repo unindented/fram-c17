@@ -1,37 +1,47 @@
 #include "app/cmd_config.h"
 
-#include <errno.h>
-#include <stdio.h>
+#include <stddef.h>
 
-#include "core/error.h"
 #include "domain/gallery_config.h"
+#include "runtime/memory.h"
+#include "runtime/os.h"
+#include "shared/arena.h"
+#include "shared/buf.h"
+#include "shared/log.h"
 
-enum ExitCode cmd_config_run(void) {
+/**
+ * Bytes `cmd_config_run` reserves. One third of the block holds the loaded values, one the file
+ * bytes, and one the log. A config is capped at 1 MiB, so 16 MiB is plenty.
+ */
+enum { CMD_CONFIG_RESERVE_LEN = 16 * 1024 * 1024 };
+
+enum ExitCode cmd_config_run(struct Os* os) {
+  struct Arena block;
+  const int shift = arena_reserve_halving(CMD_CONFIG_RESERVE_LEN, &block);
+  struct Arena scratch = block;
+  struct Arena perm = arena_split(&scratch, (CMD_CONFIG_RESERVE_LEN / 3) >> shift);
+  struct Arena log_arena = arena_split(&scratch, (CMD_CONFIG_RESERVE_LEN / 3) >> shift);
+  struct Log log = {.buf = {.arena = &log_arena}};
+  memory_oom_set_log(&log);
   struct GalleryConfig gallery_config;
   gallery_config_init(&gallery_config);
 
   enum ExitCode rc = EXIT_CODE_FAILURE;
-  char error_message[ERROR_MESSAGE_SIZE];
-  if (gallery_config_load(&gallery_config, GALLERY_CONFIG_PATH_DEFAULT, error_message,
-                          sizeof(error_message)) != 0) {
-    fprintf(stderr, "%s\n", error_message);
+  // A load that read the file still reports every bad key, and none of them may be printed as the
+  // resolved config.
+  if (gallery_config_load(&gallery_config, GALLERY_CONFIG_PATH_DEFAULT, os, &perm, scratch, &log) !=
+          0 ||
+      log.errors > 0) {
+    (void)os_print(os, 2, buf_str(&log.buf));
     goto cleanup;
   }
-  if (gallery_config_print(stdout, &gallery_config) != 0) {
-    // Relay the stream's own reason. A full disk and a closed or invalid descriptor call for
-    // different responses, and without this they are indistinguishable. A closed pipe reaches here
-    // only when the caller ignored `SIGPIPE`. Under the default disposition, the process dies of
-    // signal 13 inside the flush instead. A read of `errno` after a callee returns is valid only
-    // under an explicit contract, and there is one. `gallery_config_print` documents that it sets
-    // `errno`, and substitutes `EIO` when the stream latched an error whose own `errno` may have
-    // been overwritten since.
-    fprintf(stderr, "failed to write resolved config to 'stdout': %s\n",
-            error_system_message(error_message, sizeof(error_message), errno));
+  if (gallery_config_print(&gallery_config, os, scratch) != 0) {
     goto cleanup;
   }
   rc = EXIT_CODE_OK;
 
 cleanup:
-  gallery_config_free(&gallery_config);
+  memory_oom_set_log(NULL);
+  arena_release(block);
   return rc;
 }

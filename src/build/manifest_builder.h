@@ -3,10 +3,14 @@
 
 #include <stddef.h>
 
+#include "shared/arena.h"
+#include "shared/str.h"
+
 struct Album;
-struct Arena;
 struct GalleryConfig;
+struct Log;
 struct Manifest;
+struct Os;
 struct PathList;
 
 /**
@@ -24,14 +28,15 @@ struct PathList;
  *
  * @param gallery_config Configuration supplying `input_dir`, `output_dir`, `templates_dir`, and
  *                       `static_dir`. Must not be `NULL`.
- * @param err            Destination buffer for a failure diagnostic.
- * @param err_len        Size of `err` in bytes.
- * @return `0` when no input root holds `output_dir`, or `-1` when one does or on allocation
- *         failure.
+ * @param os             Host the directories are on. Must not be `NULL`.
+ * @param scratch        Arena for the ancestor paths the check builds.
+ * @param log            Log that receives the error. Must not be `NULL`.
+ * @return `0` when no input root holds `output_dir`, or `-1` when one does.
  */
 int manifest_builder_check_output_dir(const struct GalleryConfig* gallery_config,
-                                      char* err,
-                                      size_t err_len) __attribute__((nonnull(1)));
+                                      struct Os* os,
+                                      struct Arena scratch,
+                                      struct Log* log) __attribute__((nonnull(1, 2, 4)));
 
 /**
  * @brief Records every intended output path in the build manifest, rejecting duplicates and any
@@ -48,11 +53,10 @@ int manifest_builder_check_output_dir(const struct GalleryConfig* gallery_config
  * The first case catches an output that would be read back as an input without overwriting one: a
  * new file below `input_dir` can be discovered as media and one below `static_dir` is copied as a
  * static file by the next build, and a new file below `templates_dir` can be read as a partial by
- * the render of this same build. This runs `manifest_builder_check_output_dir` itself first, so an
- * `output_dir` inside a root is rejected even when the caller skipped the early check, and then
- * compares each root by `(device, inode)` against each existing directory between `output_dir` and
- * the output. That catches a symlink inside `output_dir` that leads into a root. A root that does
- * not exist holds nothing to protect and is skipped.
+ * the render of this same build. The caller has already run `manifest_builder_check_output_dir`, so
+ * this compares each root by `(device, inode)` against each existing directory between `output_dir`
+ * and the output. That catches a symlink inside `output_dir` that leads into a root. A root that
+ * does not exist holds nothing to protect and is skipped.
  *
  * The last case requires one path to be both a file and a directory.
  * `manifest_find_prefix_collision` checks for it after all paths are recorded. Both path checks
@@ -77,8 +81,7 @@ int manifest_builder_check_output_dir(const struct GalleryConfig* gallery_config
  *                       `static_dir`, the album template, and the aggregate template list. Must not
  *                       be `NULL`.
  * @param config_path    Path the configuration itself was loaded from. Claimed as an input like any
- *                       other, so a build cannot overwrite the file that configured it. Must not be
- *                       `NULL`.
+ *                       other, so a build cannot overwrite the file that configured it.
  * @param source_paths   Every discovered media source path, whose files must not be overwritten.
  *                       Must not be `NULL`.
  * @param static_paths   Every enumerated file below `static_dir`, each claimed as an input and
@@ -87,55 +90,27 @@ int manifest_builder_check_output_dir(const struct GalleryConfig* gallery_config
  * @param albums         Planned albums whose page, derivative, and original output paths, each
  *                       joined onto `output_dir`, are recorded. Must not be `NULL`.
  * @param album_count    Number of albums in `albums`.
- * @param err            Destination buffer for a failure diagnostic.
- * @param err_len        Size of `err` in bytes.
+ * @param os             Host the inputs and outputs are on. Must not be `NULL`.
+ * @param perm           Arena that owns the manifest's entries, for as long as the manifest is
+ *                       used. Must not be `NULL`.
+ * @param scratch        Arena for the input walk and the per-output checks.
+ * @param log            Log that receives every error. Every output is checked even after one
+ *                       fails, so each collision is reported in one run. Must not be `NULL`.
  * @return `0` when every output path is unique, stays out of every input tree, overwrites no input,
  *         and nests under no other, or `-1` on an output inside an input tree, a duplicate, a
  *         prefix collision, an input overwrite, an oversize path, a static file outside
- *         `static_dir`, a failed template walk, or an allocation failure.
+ *         `static_dir`, or a failed template walk.
  */
 int manifest_builder_populate(struct Manifest* manifest,
                               const struct GalleryConfig* gallery_config,
-                              const char* config_path,
+                              struct Str config_path,
                               const struct PathList* source_paths,
                               const struct PathList* static_paths,
                               const struct Album* const* albums,
-                              size_t album_count,
-                              char* err,
-                              size_t err_len) __attribute__((nonnull(1, 2, 3, 4, 5, 6)));
-
-/**
- * @brief Derives the output path a configured aggregate template is written to.
- *
- * `manifest_builder_populate` registers this path and `site_writer` writes to it, so the path the
- * manifest checked is the path that is written.
- *
- * @param output_dir    Output directory the template name is rooted under. Must not be `NULL`.
- * @param template_name Safe relative template name. Must not be `NULL`.
- * @param arena         Arena that owns the returned path. Must not be `NULL`.
- * @return Terminated output path owned by `arena`, or `NULL` on allocation failure.
- */
-char* manifest_builder_derive_template_output(const char* output_dir,
-                                              const char* template_name,
-                                              struct Arena* arena)
-    __attribute__((nonnull(1, 2, 3)));
-
-/**
- * @brief Derives the output path an enumerated static file is copied to, which keeps its path
- *        relative to `static_dir` below `output_dir`.
- *
- * `manifest_builder_populate` registers this path and `site_writer` copies the static file to it,
- * so the path the manifest checked is the path that is written.
- *
- * @param output_dir      Output directory the static file path is rooted under. Must not be
- *                        `NULL`.
- * @param static_relative Static file path relative to `static_dir`, as `path_relative_below`
- *                        returns it. Must not be `NULL`.
- * @param arena           Arena that owns the returned path. Must not be `NULL`.
- * @return Terminated output path owned by `arena`, or `NULL` on allocation failure.
- */
-char* manifest_builder_derive_static_output(const char* output_dir,
-                                            const char* static_relative,
-                                            struct Arena* arena) __attribute__((nonnull(1, 2, 3)));
+                              ptrdiff_t album_count,
+                              struct Os* os,
+                              struct Arena* perm,
+                              struct Arena scratch,
+                              struct Log* log) __attribute__((nonnull(1, 2, 4, 5, 6, 8, 9, 11)));
 
 #endif

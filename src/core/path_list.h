@@ -3,46 +3,39 @@
 
 #include <stddef.h>
 
-/** Growable list of path strings. */
+#include "shared/str.h"
+
+struct Arena;
+
+/**
+ * Growable list of path strings, all stored in one arena. A zeroed list is empty and ready to push
+ * to.
+ */
 struct PathList {
   /**
-   * Heap array of `capacity` slots. The first `count` hold path strings owned by the list, and the
-   * rest are uninitialized.
+   * Arena array of `capacity` slots. The first `count` hold arena-owned path strings, and the rest
+   * are zeroed.
    */
-  char** items;
+  struct Str* items;
 
   /** Number of populated entries in `items`. */
-  size_t count;
+  ptrdiff_t count;
 
   /** Allocated slots in `items`. */
-  size_t capacity;
+  ptrdiff_t capacity;
 };
 
 /**
- * @brief Initializes an empty path list with no heap allocation.
+ * @brief Appends an arena-owned copy of `file_path` to the list.
  *
- * @param paths List handle to prepare. Must not be `NULL`.
- */
-void path_list_init(struct PathList* paths) __attribute__((nonnull(1)));
-
-/**
- * @brief Releases all path strings and resets the list for reuse.
- *
- * Leaves the list initialized, so it may be reused without `path_list_init`.
- *
- * @param paths List to release. Must not be `NULL`.
- */
-void path_list_free(struct PathList* paths) __attribute__((nonnull(1)));
-
-/**
- * @brief Appends a heap-owned copy of `file_path` to the list.
- *
- * Grows the backing array as needed. The list owns the copy and frees it in `path_list_free`.
+ * Grows the backing array as needed. Every push to one list must use the same arena, which owns the
+ * array and every copy.
  *
  * @param paths     List to append to. Must not be `NULL`.
- * @param file_path Terminated path to copy and store. Must not be `NULL`.
- * @return `0` on success, or `-1` on size overflow or allocation failure.
+ * @param file_path Path to copy and store.
+ * @param arena     Arena that owns the list's array and the copy. Must not be `NULL`.
  */
-int path_list_push(struct PathList* paths, const char* file_path) __attribute__((nonnull(1, 2)));
+void path_list_push(struct PathList* paths, struct Str file_path, struct Arena* arena)
+    __attribute__((nonnull(1, 3)));
 
 #endif

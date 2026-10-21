@@ -4,45 +4,57 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "shared/arena.h"
+
 struct GalleryConfig;
+struct JobArenas;
+struct Log;
 struct MediaItem;
-struct StringBuffer;
+struct Os;
+struct VideoFrame;
 
 /**
  * @brief Generates stale derivatives and original copies in parallel.
  *
  * This is the second of the three parallel phases. When `media_count` is 0, it runs no job and
- * returns `0`. One job owns each media item. `video_frame_paths[index]` supplies the retained
- * auto-rotated JPEG for a video and may be `NULL` for an image. Every video frame is unlinked after
- * its job, including on failure. The caller retains and later frees the path string.
+ * returns `0`. One job owns each media item. `video_frames[index]` supplies the auto-rotated JPEG
+ * the probe extracted for a video. Every video frame is removed after its job, including on
+ * failure, best effort: a frame whose unlink fails stays marked for the caller's final cleanup. A
+ * job reads its source into a copy of its worker's scratch and allocates its decoded pixels with
+ * `malloc`, under a budget shared by every worker.
  *
  * Call this only after `manifest_builder_populate` accepts every output path. Jobs write
  * concurrently, and the manifest is what guarantees that no two of them target the same file.
  *
- * Each finished job reports progress when `is_verbose`. Failing jobs' diagnostics go to `error_out`
- * one per line, each distinct message once, up to `JOB_ERROR_REPORT_COUNT_MAX` of them plus a count
- * of the rest, so the caller reports them at a single boundary.
+ * Each finished job reports progress when `is_verbose`. Failing jobs' errors go to `log` in media
+ * order, as `job_run` collects them.
  *
- * @param gallery_config    Configured derivative sizes, crops, and qualities shared by every job.
- *                          Must not be `NULL`.
- * @param media             Probed media items, one job per item. Must not be `NULL`.
- * @param media_count       Number of items in `media`.
- * @param video_frame_paths Extracted video frame paths, one per item in `media`, `NULL` for an
- *                          image. Must not be `NULL`.
- * @param worker_count      Requested worker threads, as for `pool_run`.
- * @param is_verbose        Whether progress is printed to `stderr`.
- * @param error_out         Growable buffer that receives the collected derivative diagnostics. Must
- *                          not be `NULL`.
- * @return `0` when every job succeeded, or `-1` when a derivative job failed, the error slots could
- *         not be allocated, the worker pool could not start, or a diagnostic could not be appended.
+ * @param gallery_config Configured derivative sizes, crops, and qualities shared by every job. Must
+ *                       not be `NULL`.
+ * @param media          Probed media items, one job per item. Must not be `NULL`.
+ * @param media_count    Number of items in `media`.
+ * @param video_frames   Frame slots, one per item in `media`, filled by the probe for a video. Must
+ *                       not be `NULL`.
+ * @param worker_count   Requested worker threads, as for `pool_run`.
+ * @param worker_arenas  One `JobArenas` per requested worker, as for `job_run`. Must not be `NULL`.
+ * @param is_verbose     Whether progress is printed to `stderr`.
+ * @param os             Host the sources and frames are read from, the outputs written to and
+ *                       progress printed on, by every worker at once. Must not be `NULL`.
+ * @param scratch        Arena for the phase's own bookkeeping, as for `job_run`.
+ * @param log            Log that receives the collected derivative errors. Its arena must be none
+ *                       of the others. Must not be `NULL`.
+ * @return `0` when every job succeeded, or `-1` when a derivative job failed or the worker pool
+ *         could not start.
  */
 int derivative_renderer_generate(const struct GalleryConfig* gallery_config,
                                  struct MediaItem* const* media,
-                                 size_t media_count,
-                                 char* const* video_frame_paths,
-                                 size_t worker_count,
+                                 ptrdiff_t media_count,
+                                 struct VideoFrame* video_frames,
+                                 ptrdiff_t worker_count,
+                                 struct JobArenas* worker_arenas,
                                  bool is_verbose,
-                                 struct StringBuffer* error_out)
-    __attribute__((nonnull(1, 2, 4, 7)));
+                                 struct Os* os,
+                                 struct Arena scratch,
+                                 struct Log* log) __attribute__((nonnull(1, 2, 4, 6, 8, 10)));
 
 #endif
