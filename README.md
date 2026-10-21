@@ -19,7 +19,7 @@ Download a prebuilt binary from the [Releases](https://github.com/unindented/fra
 
 `fram` is command-based:
 
-- `fram build`: Generate the gallery in the configured output directory. Use `-w, --workers N` to set the number of worker threads. The value must be from 1 through 1024. By default, the tool uses the detected CPU count. Use `-v, --verbose` to print build progress to `stderr`.
+- `fram build`: Generate the gallery in the configured output directory. Use `-w, --workers N` to set the most worker threads the build runs. The value must be a positive integer. By default, the tool uses the detected CPU count. A build never runs more workers than it has media files or albums, whichever is more, or more than four for each online CPU. Use `-v, --verbose` to print build progress to `stderr`.
 - `fram config`: Print the resolved project configuration as TOML.
 
 Run these commands for help:
@@ -63,6 +63,8 @@ The media and template directories must exist. The static directory is optional:
 The build copies every file below `static_dir` into `output_dir` as-is, keeping its path relative to `static_dir`. A top-level file such as `static/robots.txt` lands at `output_dir/robots.txt`, and `static/assets/gallery.css` lands at `output_dir/assets/gallery.css`. A static file that names the same output path as a generated page, derivative, or aggregate template output is rejected as a conflict, not overwritten.
 
 The build rejects an input file that is too large before it reads the file: a JPEG source or video poster frame over 2,147,483,647 bytes (the decoder's input limit, just under 2 GiB), a config file over 1 MiB, or a template or partial over 4 MiB. The error message gives the limit and the file size.
+
+The build reserves its memory once, when it starts, in fixed sizes that these limits bound. Reserved memory that the build does not use costs address space but no memory. Decoded images are not part of the reservation. Under an address-space limit (`ulimit -v`) that refuses the reservation, the build first halves its worker count, down to one, and then halves the reservation until it fits, up to six times, and once more to leave room for the memory it does not reserve, such as decoded images, and then holds correspondingly less. So the limit a build needs does not grow with `-w`: it needs about 280 MB (`ulimit -v 270000`), and under less it stops at startup with `fram: out of memory`. A limit that leaves less room beside a reservation that fits than the worker threads' stacks need, about 24 MB at two workers, makes the build fail with `cannot start worker thread`. A build that needs more than it reserved or than the limit leaves, such as a template whose nested sections expand without bound or a decode too large for the memory left, prints the errors the command and the failing job logged so far and `fram: out of memory (in '<file>')`, and exits with status 1. Each worker keeps the errors it reports in at least 256 MiB, so a worker that reports about a million one-line errors, or about 290 files that each hold about 16,000 unknown keys, can also end the build in that report.
 
 Before the tool searches `input_dir`, it rejects an `output_dir` at or below `input_dir`, `templates_dir`, or `static_dir`, whether or not `output_dir` exists yet. The check compares directories, not path text, so it also catches another spelling of a directory or a symlink to it. An `output_dir` that holds the input directories, such as `output_dir = "."`, is allowed. Every search of an input directory skips `output_dir`, so a symlink that leads into it cannot feed generated files back in as inputs.
 
@@ -174,13 +176,13 @@ The repository and release archives do not include starter templates or static f
 ### Prerequisites
 
 - POSIX-like system with CMake 3.25 or later, a C17 compiler such as Clang or GCC, and pthreads.
-- `ffmpeg` and `ffprobe` for MP4 galleries and the `videos` golden test.
+- `ffmpeg` and `ffprobe` for MP4 galleries and the golden test.
 - Optional build tools: `ninja` for the multi-config portability check.
 - Optional quality tools: `clang-format`, `clang-tidy`, `cppcheck`.
 
 Vendored dependencies are included under `vendor/`:
 
-- [`sharedstuff`](https://github.com/unindented/sharedstuff-c17): Arena allocation and string buffers.
+- [`sharedstuff`](https://github.com/unindented/sharedstuff-c17): Arena allocation, counted strings, output buffers, and the diagnostic log.
 - [`copt`](https://github.com/fardaniqbal/copt): Command line option parsing.
 - [`tomlc17`](https://github.com/cktan/tomlc17): TOML configuration parsing.
 - [`stb`](https://github.com/nothings/stb): JPEG decoding, resizing, and encoding.
@@ -244,7 +246,7 @@ The binaries are `build/multi/bin/Debug/fram` and `build/multi/bin/RelWithDebInf
 
 ### Testing
 
-CTest registers the colocated unit test suite and the end-to-end golden test suite. The `photos` golden test always runs. The `videos` golden test is registered only when `ffmpeg` and `ffprobe` are available during configuration.
+CTest registers the unit test suite and the end-to-end golden test suite. The golden test is registered only when `ffmpeg` and `ffprobe` are available during configuration.
 
 #### Debug tests
 

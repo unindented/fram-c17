@@ -3,830 +3,505 @@
 
 #include "runtime/fs.h"
 
+#include <assert.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "core/ascii.h"
 #include "core/error.h"
-#include "core/grow.h"
 #include "core/path.h"
 #include "core/path_list.h"
 #include "core/text.h"
+#include "runtime/os.h"
 #include "shared/arena.h"
+#include "shared/log.h"
+#include "shared/str.h"
 
-/** First slot count allocated when a walk records its first directory. */
-enum { FS_WALK_VISITED_CAPACITY_MIN = 16 };
-
-/** State that one directory walk carries from its root through every directory it reaches. */
-struct FsWalk {
-  /** Path list that receives the matching paths, unsorted until the walk ends. */
-  struct PathList* paths;
-
-  /** Array of `suffix_count` terminated suffixes to match. */
-  const char* const* suffixes;
-
-  /** Number of entries in `suffixes`. Zero matches nothing. */
-  size_t suffix_count;
-
-  /** Whether matching folds ASCII case. */
-  bool is_fold_case;
-
-  /**
-   * Heap array of `visited_capacity` slots. The first `visited_count` hold the identity of every
-   * directory walked so far and of the excluded directory, sorted by device and then inode, so a
-   * directory reached a second time through a symlink, or the excluded one reached at all, is found
-   * by binary search and skipped.
-   */
-  struct FsIdentity* visited;
-
-  /** Number of populated entries in `visited`. */
-  size_t visited_count;
-
-  /** Allocated slots in `visited`. */
-  size_t visited_capacity;
-
-  /**
-   * Symlinked directories found so far, in the order the walk found them. The walk reaches them
-   * only after walking the root's own tree without following a symlink, so a directory with a path
-   * of its own in that tree is listed under that path rather than under an alias to it.
-   */
-  struct PathList links;
+/**
+ * The POSIX host. It has no state of its own: the process's working directory, umask and file
+ * descriptors are the state, and every call reaches them through the system.
+ */
+struct Os {
+  /** Unused. ISO C does not allow a structure without members. */
+  char unused;
 };
 
 /**
- * @brief Walks one directory, appending matching files to `walk->paths` without sorting.
- *
- * Skips a directory the walk has already visited. Otherwise lists the directory's entries, closes
- * it, and visits the entries in byte order, recursing into each real subdirectory and deferring
- * each symlinked one to `walk->links`. Closing before recursing holds one directory stream open at
- * a time, whatever the depth of the tree.
- *
- * @param walk       Walk state. Must not be `NULL`.
- * @param dir_path   Directory to walk. The tree root, a deferred symlink, or a real subdirectory
- *                   being scanned. Must not be `NULL`.
- * @param reason     Receives the failure reason, naming the directory that failed. May be `NULL`
- *                   only when `reason_len` is 0.
- * @param reason_len Size of `reason` in bytes.
- * @return `0` on success, including a skipped directory, or `-1` on a directory or allocation
- *         failure.
+ * Where an action reports its failure: the caller's log, and the caller's operation, which leads
+ * every message so the user reads what failed before why, as in
+ * `failed to read config: No such file or directory ('fram.toml')`.
  */
-static int fs_list_files_with_suffixes_inner(struct FsWalk* walk,
-                                             const char* dir_path,
-                                             char* reason,
-                                             size_t reason_len) __attribute__((nonnull(1, 2)));
+struct FsReport {
+  /** Operation the caller was performing, such as `failed to read config`. */
+  struct Str operation;
+
+  /** Log that receives the message. */
+  struct Log* log;
+};
+
+/** Bytes `os_write` moves per `read` and `write` when it streams a source file. */
+enum { FS_WRITE_BUFFER_SIZE = 64 * 1024 };
+
+/** The file one `os_write` call writes, from its open to its close. */
+struct FsWriteTarget {
+  /** Destination path, named in a failure. */
+  struct Str file_path;
+
+  /** Descriptor open for writing, or `-1` before the open succeeds. */
+  int fd;
+
+  /** Terminated destination path. */
+  char path[PATH_MAX];
+};
+
+/** What `os_list_classify` found one directory entry to be. */
+enum ListClassify {
+  /** A regular file or a directory, once symlinks are followed, so the listing keeps it. */
+  LIST_CLASSIFY_LISTED,
+
+  /** Another kind of file, or a symlink that resolves to nothing, so the listing leaves it out. */
+  LIST_CLASSIFY_SKIPPED,
+
+  /** An entry that exists but could not be inspected, with `errno` set, so the listing fails. */
+  LIST_CLASSIFY_FAILED,
+};
 
 /**
- * @brief Records `excluded_dir` as already walked, so every path that reaches it is skipped.
+ * @brief Reads the whole of an open file into `data` and closes it. A step of `os_read`.
  *
- * @param walk         Walk state whose visited set is seeded. Must not be `NULL`.
- * @param excluded_dir Directory to leave out of the walk, or `NULL` for none. A path with no
- *                     identity records nothing, because nothing below it can be listed.
- * @param reason       Receives the failure reason. May be `NULL` only when `reason_len` is 0.
- * @param reason_len   Size of `reason` in bytes.
- * @return `0` on success, or `-1` on allocation failure.
+ * Reads through a stream over `fd` and closes the stream whatever happens, so a close error fails
+ * the read too. Only the first failure is reported, because a later one is a consequence of it.
+ *
+ * @param data      Buffer of at least `data_len` bytes that receives the file contents. Must not be
+ *                  `NULL`.
+ * @param data_len  Number of bytes to read, taken from the `fstat` of the open file. Must not be
+ *                  negative.
+ * @param fd        Descriptor positioned at the start of the file, which this closes.
+ * @param file_path Path of the file, named in a failure.
+ * @param report    Where a failure is reported. Must not be `NULL`.
+ * @return `0` when exactly `data_len` stable bytes were read and the file closed, or `-1`
+ *         otherwise.
  */
-static int fs_list_files_with_suffixes_exclude(struct FsWalk* walk,
-                                               const char* excluded_dir,
-                                               char* reason,
-                                               size_t reason_len) __attribute__((nonnull(1)));
+static int os_read_bytes(char* data,
+                         ptrdiff_t data_len,
+                         int fd,
+                         struct Str file_path,
+                         const struct FsReport* report) __attribute__((nonnull(1, 5)));
 
 /**
- * @brief Records one directory identity as visited, reporting whether it was already recorded.
- *
- * @param walk       Walk state whose visited set is searched and extended. Must not be `NULL`.
- * @param identity   Identity of the directory about to be walked or excluded. Must not be `NULL`.
- * @param is_new_out Receives `true` when `identity` had not been visited and is now recorded, or
- *                   `false` when it had. Written only on success. Must not be `NULL`.
- * @param reason     Receives the failure reason. May be `NULL` only when `reason_len` is 0.
- * @param reason_len Size of `reason` in bytes.
- * @return `0` on success, or `-1` on allocation failure.
- */
-static int fs_list_files_with_suffixes_record(struct FsWalk* walk,
-                                              const struct FsIdentity* identity,
-                                              bool* is_new_out,
-                                              char* reason,
-                                              size_t reason_len) __attribute__((nonnull(1, 2, 3)));
-
-/**
- * @brief Reads every entry name in `dir_path` except `.` and `..`, sorted in byte order.
- *
- * @param names      Initialized path list that receives the bare entry names. Must not be `NULL`.
- * @param dir_path   Directory to read. Must not be `NULL`.
- * @param reason     Receives the failure reason, naming `dir_path`. May be `NULL` only when
- *                   `reason_len` is 0.
- * @param reason_len Size of `reason` in bytes.
- * @return `0` on success, or `-1` on an open, read, close, or allocation failure.
- */
-static int read_dir_names(struct PathList* names,
-                          const char* dir_path,
-                          char* reason,
-                          size_t reason_len) __attribute__((nonnull(1, 2)));
-
-/**
- * @brief Appends one matching regular file, descends into a real subdirectory, or defers a
- *        symlinked one.
- *
- * @param walk       Walk state. Must not be `NULL`.
- * @param dir_path   Directory containing `entry_name`. Must not be `NULL`.
- * @param entry_name Bare directory entry name to inspect. Must not be `NULL`.
- * @param scratch    Arena owning the joined path for this entry. Owned by the enclosing directory's
- *                   walk, which outlives any recursion into this entry. Must not be `NULL`.
- * @param reason     Receives the failure reason. May be `NULL` only when `reason_len` is 0.
- * @param reason_len Size of `reason` in bytes.
- * @return `0` on success (including skipped entries), or `-1` on failure.
- */
-static int visit_matching_entry(struct FsWalk* walk,
-                                const char* dir_path,
-                                const char* entry_name,
-                                struct Arena* scratch,
-                                char* reason,
-                                size_t reason_len) __attribute__((nonnull(1, 2, 3, 4)));
-
-/**
- * @brief Compares two directory identities by device and then inode.
- *
- * @param a First identity. Must not be `NULL`.
- * @param b Second identity. Must not be `NULL`.
- * @return A negative, zero, or positive value as `a` sorts before, equal to, or after `b`.
- */
-static int compare_identities(const struct FsIdentity* a, const struct FsIdentity* b)
-    __attribute__((nonnull(1, 2)));
-
-/**
- * @brief Reports whether `text` ends with the literal `suffix`.
- *
- * @param text         Terminated string to test. Must not be `NULL`.
- * @param suffix       Terminated suffix to look for. Must not be `NULL`.
- * @param is_fold_case Whether ASCII case differences are ignored, so `.JpG` matches `.jpg`. Bytes
- *                     outside ASCII always compare exactly.
- * @return `true` when `text` ends with `suffix`, `false` otherwise.
- */
-static bool has_suffix(const char* text, const char* suffix, bool is_fold_case)
-    __attribute__((nonnull(1, 2)));
-
-/**
- * @brief Reports whether `text` ends with any of `suffixes`.
- *
- * @param text         Terminated string to test. Must not be `NULL`.
- * @param suffixes     Array of `suffix_count` terminated suffixes. Must not be `NULL`.
- * @param suffix_count Number of entries in `suffixes`. Zero matches nothing.
- * @param is_fold_case Whether ASCII case differences are ignored, as in `has_suffix`.
- * @return `true` when `text` ends with at least one suffix, `false` otherwise.
- */
-static bool has_any_suffix(const char* text,
-                           const char* const* suffixes,
-                           size_t suffix_count,
-                           bool is_fold_case) __attribute__((nonnull(1, 2)));
-
-/**
- * @brief Compares two `PathList` item pointers for `qsort`.
- *
- * @param a Pointer to the first `char*` element. Must not be `NULL`.
- * @param b Pointer to the second `char*` element. Must not be `NULL`.
- * @return A negative, zero, or positive value per `strcmp` of the two paths.
- */
-static int compare_paths(const void* a, const void* b) __attribute__((nonnull(1, 2)));
-
-/**
- * @brief Reads exactly `data_len` bytes into `data`, verifying the file did not change underneath.
+ * @brief Reads exactly `data_len` bytes from a stream, verifying the file did not change
+ *        underneath. A step of `os_read_bytes`.
  *
  * `fstat` and `fread` are two observations of a file another process may be writing, so a read that
  * returns anything other than `data_len` bytes is a changed file rather than a partial success.
  * Both directions are rejected: too few bytes means the file shrank, and one readable byte past
  * `data_len` means it grew. Byte values have no policy here; text consumers validate separately.
  *
- * @param data       Buffer of at least `data_len` bytes that receives the file contents. Must not
- *                   be `NULL`.
- * @param data_len   Number of bytes to read, taken from the `fstat` of the open file.
- * @param fp         Stream positioned at the start of the file. Must not be `NULL`.
- * @param reason     Receives the failure reason. May be `NULL` only when `reason_len` is 0.
- * @param reason_len Size of `reason` in bytes.
+ * @param data      Buffer of at least `data_len` bytes that receives the file contents. Must not be
+ *                  `NULL`.
+ * @param data_len  Number of bytes to read. Must not be negative.
+ * @param fp        Stream positioned at the start of the file. Must not be `NULL`.
+ * @param file_path Path of the file, named in a failure.
+ * @param report    Where a failure is reported. Must not be `NULL`.
  * @return `0` when exactly `data_len` stable bytes were read, or `-1` otherwise.
  */
-static int fs_read_file_bytes(unsigned char* data,
-                              size_t data_len,
-                              FILE* fp,
-                              char* reason,
-                              size_t reason_len) __attribute__((nonnull(1, 3)));
+static int os_read_bytes_exact(char* data,
+                               ptrdiff_t data_len,
+                               FILE* fp,
+                               struct Str file_path,
+                               const struct FsReport* report) __attribute__((nonnull(1, 3, 5)));
 
 /**
- * @brief Creates the parent directory of `file_path` if it has one.
+ * @brief Opens the destination of an `os_write` call, creating or truncating it. A step of
+ *        `os_write`.
  *
- * @param file_path  Path whose parent directory should exist. Must not be `NULL`.
- * @param reason     Receives the failure reason. May be `NULL` only when `reason_len` is 0.
- * @param reason_len Size of `reason` in bytes.
- * @return `0` on success or when the path has no directory component, or `-1` on failure.
+ * @param target Target whose `file_path` is set. Receives the open descriptor and the terminated
+ *               path. Must not be `NULL`.
+ * @param report Where a failure is reported. Must not be `NULL`.
+ * @return `0` on success, or `-1` when the file cannot be opened or created.
  */
-static int ensure_parent_dir(const char* file_path, char* reason, size_t reason_len)
-    __attribute__((nonnull(1)));
+static int os_write_open(struct FsWriteTarget* target, const struct FsReport* report)
+    __attribute__((nonnull(1, 2)));
+
+/**
+ * @brief Writes every byte of `source` to `fd`. A step of `os_write`.
+ *
+ * @param fd        Descriptor open for writing.
+ * @param source    Bytes to write.
+ * @param source_fd Descriptor of the open source file of an `OS_SOURCE_FILE` write, or `-1`.
+ * @param file_path Destination path, named in a write failure.
+ * @param report    Where a failure is reported. Must not be `NULL`.
+ * @return `0` once every byte is written, or `-1` on a read or write failure.
+ */
+static int os_write_source(int fd,
+                           struct OsSource source,
+                           int source_fd,
+                           struct Str file_path,
+                           const struct FsReport* report) __attribute__((nonnull(5)));
+
+/**
+ * @brief Copies the open source file of an `OS_SOURCE_FILE` write to `fd`.
+ *
+ * @param fd          Descriptor open for writing.
+ * @param source_fd   Descriptor of the source file, positioned at its start.
+ * @param source_path Source path, named in a read failure.
+ * @param file_path   Destination path, named in a write failure.
+ * @param report      Where a failure is reported. Must not be `NULL`.
+ * @return `0` once the whole source is copied, or `-1` on a read or write failure.
+ */
+static int os_write_source_stream(int fd,
+                                  int source_fd,
+                                  struct Str source_path,
+                                  struct Str file_path,
+                                  const struct FsReport* report) __attribute__((nonnull(5)));
+
+/**
+ * @brief Closes the descriptors an `os_write` call opened. A step of `os_write`.
+ *
+ * @param target      Target, open or not. Must not be `NULL`.
+ * @param source_fd   Descriptor of the open source file of an `OS_SOURCE_FILE` write, or `-1`.
+ * @param source_path Source path, named in a close failure.
+ * @param rc          Result of the write so far. A failure in it is the one reported.
+ * @param report      Where a failure is reported. Must not be `NULL`.
+ * @return `0` when `rc` is `0` and every close succeeds, or `-1`.
+ */
+static int os_write_close(const struct FsWriteTarget* target,
+                          int source_fd,
+                          struct Str source_path,
+                          int rc,
+                          const struct FsReport* report) __attribute__((nonnull(1, 5)));
+
+/**
+ * @brief Creates `dir_path` and any missing parent directories. The body of `os_mkdirs`, which
+ *        `os_write` shares for a file's parent directories so a write reports its own operation.
+ *
+ * @param dir_path Directory path to create. An empty string is a no-op.
+ * @param report   Where a failure is reported, naming the component that could not be created. Must
+ *                 not be `NULL`.
+ * @return `0` on success, or `-1` if a component cannot be created.
+ */
+static int mkdirs_report(struct Str dir_path, const struct FsReport* report)
+    __attribute__((nonnull(2)));
 
 /**
  * @brief Creates one directory, accepting a path that already names a directory.
  *
- * Creates only the named directory. `fs_mkdir_p` walks the path and calls this per component.
+ * Creates only the named directory. `mkdirs_report` walks the path and calls this per component.
  *
- * @param dir_path   Directory path to create. Must not be `NULL`.
- * @param reason     Receives the failure reason, naming `dir_path` since it is one component of a
- *                   path the caller named whole. May be `NULL` only when `reason_len` is 0.
- * @param reason_len Size of `reason` in bytes.
+ * @param dir_path Directory path to create.
+ * @param report   Where a failure is reported, naming `dir_path` since it is one component of a
+ *                 path the caller named whole. Must not be `NULL`.
  * @return `0` on success or when `dir_path` already names a directory, or `-1` on failure.
  */
-static int ensure_dir(const char* dir_path, char* reason, size_t reason_len)
-    __attribute__((nonnull(1)));
+static int mkdirs_report_one(struct Str dir_path, const struct FsReport* report)
+    __attribute__((nonnull(2)));
+
+/**
+ * @brief Reads every entry name in `dir_path` except `.` and `..`.
+ *
+ * @param names    Path list that receives the bare entry names. Must not be `NULL`.
+ * @param dir_path Directory to read.
+ * @param arena    Arena that owns `names` and the names in it. Must not be `NULL`.
+ * @param report   Where a failure is reported, naming `dir_path`. Must not be `NULL`.
+ * @return `0` on success, or `-1` on an open, read, or close failure.
+ */
+static int os_list_names(struct PathList* names,
+                         struct Str dir_path,
+                         struct Arena* arena,
+                         const struct FsReport* report) __attribute__((nonnull(1, 3, 4)));
+
+/**
+ * @brief Classifies one directory entry, following it when it is a symlink.
+ *
+ * @param file_path Entry path to inspect.
+ * @param kind_out  Receives what the entry names. Must not be `NULL`.
+ * @return `LIST_CLASSIFY_LISTED` when the entry names a regular file or a directory and the outputs
+ *         are written, `LIST_CLASSIFY_SKIPPED` for another kind of file or one that resolves to
+ *         nothing, or `LIST_CLASSIFY_FAILED` with `errno` set when it exists but could not be
+ *         inspected.
+ */
+static enum ListClassify os_list_classify(struct Str file_path, enum OsEntryKind* kind_out)
+    __attribute__((nonnull(2)));
+
+/**
+ * @brief Opens a file to read from and checks that it is a regular file, for `os_read` and the
+ *        source of an `OS_SOURCE_FILE` write.
+ *
+ * It opens without blocking and inspects the descriptor rather than the path, so the file checked
+ * is the file read, and a path swapped to a FIFO cannot block the open waiting for a writer. The
+ * flag is cleared again once the file is known to be regular.
+ *
+ * @param file_path File to open.
+ * @param fd_out    Receives the open descriptor. Written only on success. Must not be `NULL`.
+ * @param st_out    Receives the `fstat` of the descriptor. Must not be `NULL`.
+ * @param report    Where a failure is reported, naming `file_path`. Must not be `NULL`.
+ * @return `0` on success, or `-1` when the file cannot be opened or inspected, or is not regular.
+ */
+static int open_regular(struct Str file_path,
+                        int* fd_out,
+                        struct stat* st_out,
+                        const struct FsReport* report) __attribute__((nonnull(2, 3, 4)));
+
+/**
+ * Most bytes `write_all` passes to one `write`, because macOS refuses a count above `INT_MAX` with
+ * `EINVAL`.
+ */
+enum { FS_WRITE_LEN_MAX = 1024 * 1024 * 1024 };
 
 /**
  * @brief Writes every byte to an open descriptor, retrying interrupted and short writes.
  *
- * @param fd         Descriptor open for writing.
- * @param data       Bytes to write. Must hold at least `data_len` bytes. Must not be `NULL`.
- * @param data_len   Number of bytes to write.
- * @param reason     Receives the failure reason. May be `NULL` only when `reason_len` is 0.
- * @param reason_len Size of `reason` in bytes.
- * @return `0` once all `data_len` bytes are written, or `-1` on a write error or a write that makes
- *         no progress.
+ * @param fd   Descriptor open for writing.
+ * @param data Bytes to write.
+ * @return `0` once every byte is written, or `-1` with `errno` set on a write error, or to `EIO` on
+ *         a write that makes no progress, which no system error of its own describes.
  */
-static int write_all(int fd, const void* data, size_t data_len, char* reason, size_t reason_len)
-    __attribute__((nonnull(2)));
+static int write_all(int fd, struct Str data);
 
 /**
- * @brief Reports `error_number` alone as a failure reason.
+ * @brief Copies a path into a terminated buffer for a system call.
  *
- * This is for a failure on the path the caller already names, where repeating it would only pad the
- * composed diagnostic.
- *
- * @param reason       Receives the reason. May be `NULL` only when `reason_len` is 0.
- * @param reason_len   Size of `reason` in bytes.
- * @param error_number `errno` value to describe.
- * @return `-1` always, so a caller can write `return fs_reason_errno(...);`.
+ * @param path     Path to convert.
+ * @param cstr_out Buffer of `PATH_MAX` bytes that receives the terminated path. Must not be `NULL`.
+ * @return `0` on success, or `-1` with `errno` set to `ENAMETOOLONG` when the path and its
+ *         terminator exceed `PATH_MAX`, or to `EINVAL` when it holds a `NUL` byte.
  */
-static int fs_reason_errno(char* reason, size_t reason_len, int error_number);
+static int copy_cstr(struct Str path, char cstr_out[static PATH_MAX]);
 
 /**
- * @brief Reports `error_number` as a failure reason naming the operation and path that failed.
+ * @brief Reports `error_number` as the cause of the caller's operation failing on `path`.
  *
- * This is for a failure on a path the caller cannot name, such as a directory reached partway
- * through a recursive walk or one component of a path created whole.
+ * This is for a failure on the path the caller's operation targeted, as in
+ * `failed to read config: No such file or directory ('fram.toml')`.
  *
- * @param reason       Receives the reason. May be `NULL` only when `reason_len` is 0.
- * @param reason_len   Size of `reason` in bytes.
- * @param action       Lowercase operation that failed, such as `open directory`. Must not be
- *                     `NULL`.
- * @param path         Path the operation was attempted on. Must not be `NULL`.
+ * @param report       Where the failure is reported. Must not be `NULL`.
+ * @param path         Path the operation targeted.
  * @param error_number `errno` value to describe.
- * @return `-1` always, so a caller can write `return fs_reason_path_errno(...);`.
+ * @return `-1` always, so a caller can write `return report_errno(...);`.
  */
-static int fs_reason_path_errno(char* reason,
-                                size_t reason_len,
-                                const char* action,
-                                const char* path,
-                                int error_number) __attribute__((nonnull(3, 4)));
+static int report_errno(const struct FsReport* report, struct Str path, int error_number)
+    __attribute__((nonnull(1)));
 
-int fs_list_files_with_suffixes(struct PathList* paths,
-                                const char* root_dir,
-                                const char* excluded_dir,
-                                const char* const* suffixes,
-                                size_t suffix_count,
-                                bool is_fold_case,
-                                char* reason,
-                                size_t reason_len) {
-  struct FsWalk walk = {.paths = paths,
-                        .suffixes = suffixes,
-                        .suffix_count = suffix_count,
-                        .is_fold_case = is_fold_case};
-  path_list_init(&walk.links);
-  int rc = fs_list_files_with_suffixes_exclude(&walk, excluded_dir, reason, reason_len);
-  if (rc == 0) {
-    rc = fs_list_files_with_suffixes_inner(&walk, root_dir, reason, reason_len);
-  }
-  // A deferred link can defer more links of its own, so this reads `count` on every iteration
-  // rather than once.
-  for (size_t i = 0; rc == 0 && i < walk.links.count; i++) {
-    rc = fs_list_files_with_suffixes_inner(&walk, walk.links.items[i], reason, reason_len);
-  }
-  free(walk.visited);
-  path_list_free(&walk.links);
-  // Skip the empty case rather than let `qsort` see it. `path_list_init` leaves `items` `NULL`, and
-  // passing a null pointer to `qsort` is undefined even with a count of 0.
-  if (rc == 0 && paths->count > 0) {
-    qsort(paths->items, paths->count, sizeof(*paths->items), compare_paths);
-  }
-  return rc;
+/**
+ * @brief Reports `error_number` as the cause of one step of the caller's operation failing.
+ *
+ * This is for a failure on a path the caller cannot name, such as a directory entry or one
+ * component of a path created whole, so the message names the step as well, as in
+ * `failed to list source media: cannot open directory: <cause> ('<dir>')`.
+ *
+ * @param report       Where the failure is reported. Must not be `NULL`.
+ * @param step         Lowercase step that failed, such as `open directory`.
+ * @param path         Path the step was attempted on.
+ * @param error_number `errno` value to describe.
+ * @return `-1` always, so a caller can write `return report_step_errno(...);`.
+ */
+static int report_step_errno(const struct FsReport* report,
+                             struct Str step,
+                             struct Str path,
+                             int error_number) __attribute__((nonnull(1)));
+
+struct Os* os_posix(void) {
+  static struct Os os;
+  return &os;
 }
 
-int fs_read_file(const char* file_path,
-                 size_t data_len_max,
-                 unsigned char** data_out,
-                 size_t* data_len_out,
-                 char* reason,
-                 size_t reason_len) {
-  // Open without blocking and inspect the descriptor rather than the path, so the file checked is
-  // the file read. A path swapped to a FIFO would otherwise block the open waiting for a writer.
-  // The flag is cleared again once the file is known to be regular.
-  const int fd = open(file_path, O_RDONLY | O_NONBLOCK);
-  if (fd < 0) {
-    return fs_reason_errno(reason, reason_len, errno);
-  }
+int os_read(struct Os* os,
+            struct Str file_path,
+            ptrdiff_t data_len_max,
+            struct Arena* perm,
+            struct Str* data_out,
+            struct Str operation,
+            struct Log* log) {
+  (void)os;
+  const struct FsReport report = {operation, log};
+  int fd = -1;
   struct stat st;
-  int rc = 0;
-  if (fstat(fd, &st) != 0) {
-    rc = fs_reason_errno(reason, reason_len, errno);
-  } else if (!S_ISREG(st.st_mode)) {
-    rc = error_report(reason, reason_len, "not a regular file");
-  } else if ((uintmax_t)st.st_size > (uintmax_t)data_len_max) {
+  if (open_regular(file_path, &fd, &st, &report) != 0) {
+    return -1;
+  }
+  if (st.st_size > data_len_max) {
     // Check the limit against the `fstat` size, before anything is allocated or read, so an
     // oversize file costs one `fstat` rather than its whole size in memory. A file that grows past
-    // the limit after this check is still caught, because `fs_read_file_bytes` rejects any byte
-    // beyond this size. `data_len_max` is below `SIZE_MAX` by contract, so passing this check also
-    // keeps `size + 1` from wrapping to 0. Both sides widen to `uintmax_t` because `off_t` and
-    // `size_t` may differ in width.
-    rc = error_report(reason, reason_len, "exceeds max file size (%zu bytes) at %ju bytes",
-                      data_len_max, (uintmax_t)st.st_size);
-  }
-  if (rc == 0 && fcntl(fd, F_SETFL, 0) != 0) {
-    rc = fs_reason_errno(reason, reason_len, errno);
-  }
-  FILE* fp = rc == 0 ? fdopen(fd, "rb") : NULL;
-  if (fp == NULL) {
-    if (rc == 0) {
-      (void)fs_reason_errno(reason, reason_len, errno);
-    }
+    // the limit after this check is still caught, because `os_read_bytes_exact` rejects any byte
+    // beyond this size.
+    (void)log_error(log, "%.*s: exceeds max file size (%td bytes) at %jd bytes ('%.*s')",
+                    STR_FMT(operation), data_len_max, (intmax_t)st.st_size, STR_FMT(file_path));
     // The failure above is the one reported, so a close error on this path adds nothing.
     (void)close(fd);
     return -1;
   }
-
-  const size_t size = (size_t)st.st_size;
-
-  // Use `malloc`, not `calloc`. `fs_read_file_bytes` writes all `size` bytes or fails, so only the
-  // terminator needs to be zero, and zero-filling first would mean a second pass over the largest
-  // file this program reads.
-  unsigned char* data = malloc(size + 1);
-  rc = -1;
-  if (data == NULL) {
-    (void)error_report(reason, reason_len, "out of memory");
-  } else {
-    data[size] = '\0';
-    rc = fs_read_file_bytes(data, size, fp, reason, reason_len);
+  // The size is within `data_len_max`, so it converts to `ptrdiff_t` exactly. Allocating from a
+  // copy of `perm` and publishing it only on success leaves `perm` as it found it when the read
+  // fails.
+  const ptrdiff_t data_len = (ptrdiff_t)st.st_size;
+  struct Arena arena = *perm;
+  // The read overwrites every byte, so the bytes are not zeroed first: an empty `arena_alloc`
+  // places them and `arena_extend` takes them as they are, which saves a pass over every byte read.
+  (void)arena_alloc(&arena, 0, 1, 1);
+  char* data = arena_extend(&arena, data_len, 1);
+  if (os_read_bytes(data, data_len, fd, file_path, &report) != 0) {
+    return -1;
   }
-  // Close before publishing so a close error fails the read and the buffer is still reclaimed.
+  *perm = arena;
+  // `os_read_bytes` succeeds only on a full read, so the byte count is the stat size.
+  *data_out = (struct Str){data, data_len};
+  return 0;
+}
+
+int os_write(struct Os* os,
+             struct Str file_path,
+             struct OsSource source,
+             struct Str operation,
+             struct Log* log) {
+  (void)os;
+  const struct FsReport report = {operation, log};
+  // A file source is opened first, so a source that is missing or not regular creates no parent
+  // directory and no destination.
+  int source_fd = -1;
+  struct stat source_st;
+  if (source.kind == OS_SOURCE_FILE &&
+      open_regular(source.file_path, &source_fd, &source_st, &report) != 0) {
+    return -1;
+  }
+  struct FsWriteTarget target = {.file_path = file_path, .fd = -1};
+  // A path with no `/` has no parent to create, and one whose only `/` is the leading one has the
+  // root, which always exists. Both yield an empty parent, which `mkdirs_report` treats as a no-op.
+  int rc = mkdirs_report(path_parent(file_path), &report);
+  if (rc == 0) {
+    rc = os_write_open(&target, &report);
+  }
+  if (rc == 0) {
+    rc = os_write_source(target.fd, source, source_fd, file_path, &report);
+  }
+  return os_write_close(&target, source_fd, source.file_path, rc, &report);
+}
+
+int os_mkdirs(struct Os* os, struct Str dir_path, struct Str operation, struct Log* log) {
+  (void)os;
+  const struct FsReport report = {operation, log};
+  return mkdirs_report(dir_path, &report);
+}
+
+int os_list(struct Os* os,
+            struct Str dir_path,
+            struct Arena* perm,
+            struct OsEntry** entries_out,
+            ptrdiff_t* count_out,
+            struct Str operation,
+            struct Log* log) {
+  (void)os;
+  const struct FsReport report = {operation, log};
+  // Every name is read and the directory closed before any entry is inspected, so a caller that
+  // recurses into an entry holds no directory open while it does.
+  struct Arena arena = *perm;
+  struct PathList names = {0};
+  if (os_list_names(&names, dir_path, &arena, &report) != 0) {
+    return -1;
+  }
+  struct OsEntry* entries = arena_new(&arena, names.count, struct OsEntry);
+  ptrdiff_t count = 0;
+  for (ptrdiff_t i = 0; i < names.count; i++) {
+    // The joined path is needed only for the inspection, so it goes in a copy of the arena that the
+    // next entry reuses.
+    struct Arena join_arena = arena;
+    const struct Str file_path = path_join(dir_path, names.items[i], &join_arena);
+    enum OsEntryKind kind = OS_ENTRY_FILE;
+    const enum ListClassify classified = os_list_classify(file_path, &kind);
+    if (classified == LIST_CLASSIFY_FAILED) {
+      // A file is there and could not be inspected: `EACCES` from a parent directory that is
+      // readable but not searchable, `ENAMETOOLONG`, `EIO`. Skipping it would drop a file from the
+      // build and still report success, so it is listed for the caller to report.
+      entries[count] = (struct OsEntry){names.items[i], OS_ENTRY_FAILED, errno};
+      count++;
+    } else if (classified == LIST_CLASSIFY_LISTED) {
+      entries[count] = (struct OsEntry){names.items[i], kind, 0};
+      count++;
+    }
+  }
+  *perm = arena;
+  *entries_out = entries;
+  *count_out = count;
+  return 0;
+}
+
+int os_stat(struct Os* os, struct Str file_path, struct OsStat* stat_out) {
+  (void)os;
+  char path[PATH_MAX];
+  struct stat st;
+  if (copy_cstr(file_path, path) != 0 || stat(path, &st) != 0) {
+    return -1;
+  }
+  stat_out->identity = (struct OsIdentity){(uint64_t)st.st_dev, (uint64_t)st.st_ino};
+  stat_out->is_dir = S_ISDIR(st.st_mode);
+  // A size beyond `PTRDIFF_MAX` cannot occur on a 64-bit system, and on a 32-bit one it is clamped,
+  // which no size limit accepts anyway.
+  stat_out->len = st.st_size < PTRDIFF_MAX ? (ptrdiff_t)st.st_size : PTRDIFF_MAX;
+#if defined(__APPLE__)
+  stat_out->mtime_s = (int64_t)st.st_mtimespec.tv_sec;
+  stat_out->mtime_ns = (int64_t)st.st_mtimespec.tv_nsec;
+#else
+  stat_out->mtime_s = (int64_t)st.st_mtim.tv_sec;
+  stat_out->mtime_ns = (int64_t)st.st_mtim.tv_nsec;
+#endif
+  return 0;
+}
+
+int os_print(struct Os* os, int fd, struct Str text) {
+  (void)os;
+  return write_all(fd, text);
+}
+
+static int os_read_bytes(char* data,
+                         ptrdiff_t data_len,
+                         int fd,
+                         struct Str file_path,
+                         const struct FsReport* report) {
+  FILE* fp = fdopen(fd, "rb");
+  if (fp == NULL) {
+    (void)report_errno(report, file_path, errno);
+    // The failure above is the one reported, so a close error on this path adds nothing.
+    (void)close(fd);
+    return -1;
+  }
+  int rc = os_read_bytes_exact(data, data_len, fp, file_path, report);
   if (fclose(fp) != 0) {
     if (rc == 0) {
-      (void)fs_reason_errno(reason, reason_len, errno);
-    }
-    rc = -1;
-  }
-  if (rc == 0) {
-    *data_out = data;
-    // `fs_read_file_bytes` succeeds only on a full read, so the byte count is the stat size.
-    *data_len_out = size;
-    data = NULL;
-  }
-
-  free(data);
-  return rc;
-}
-
-int fs_write_file(const char* file_path,
-                  const void* data,
-                  size_t data_len,
-                  char* reason,
-                  size_t reason_len) {
-  if (ensure_parent_dir(file_path, reason, reason_len) != 0) {
-    return -1;
-  }
-  // Mode `0666` is a ceiling the process umask trims, which is how every file this module creates
-  // gets its permissions. An existing destination keeps its own mode, because `O_TRUNC` writes
-  // through the file that is already there.
-  const int fd = open(file_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-  if (fd < 0) {
-    return fs_reason_errno(reason, reason_len, errno);
-  }
-  int rc = write_all(fd, data, data_len, reason, reason_len);
-  if (close(fd) != 0) {
-    if (rc == 0) {
-      (void)fs_reason_errno(reason, reason_len, errno);
+      (void)report_errno(report, file_path, errno);
     }
     rc = -1;
   }
   return rc;
 }
 
-int fs_copy_file(const char* source_path, const char* dest_path, char* reason, size_t reason_len) {
-  // Open without blocking so a FIFO reaches the regular-file check below instead of waiting for a
-  // writer. The flag is cleared again once the source is known to be regular.
-  const int source_fd = open(source_path, O_RDONLY | O_NONBLOCK);
-  if (source_fd < 0) {
-    return fs_reason_errno(reason, reason_len, errno);
-  }
-  struct stat source_st;
-  int rc = 0;
-  if (fstat(source_fd, &source_st) != 0) {
-    rc = fs_reason_errno(reason, reason_len, errno);
-  } else if (!S_ISREG(source_st.st_mode)) {
-    rc = error_report(reason, reason_len, "not a regular file");
-  } else if (ensure_parent_dir(dest_path, reason, reason_len) != 0) {
-    rc = -1;
-  }
-  if (rc == 0 && fcntl(source_fd, F_SETFL, 0) != 0) {
-    rc = fs_reason_errno(reason, reason_len, errno);
-  }
-
-  int dest_fd = -1;
-  if (rc == 0) {
-    // The copy deliberately does not carry the source's mode over. A published static file gets the
-    // same `0666`-minus-umask treatment as every other file this module creates, rather than
-    // inheriting whatever the source tree happened to have, which would let a `0600` stylesheet
-    // publish unreadable.
-    dest_fd = open(dest_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (dest_fd < 0) {
-      rc = fs_reason_errno(reason, reason_len, errno);
-    }
-  }
-
-  unsigned char buffer[64 * 1024];
-  while (rc == 0) {
-    const ssize_t nread = read(source_fd, buffer, sizeof(buffer));
-    if (nread > 0) {
-      rc = write_all(dest_fd, buffer, (size_t)nread, reason, reason_len);
-    } else if (nread == 0) {
-      break;
-    } else if (errno != EINTR) {
-      rc = fs_reason_errno(reason, reason_len, errno);
-    }
-  }
-  if (close(source_fd) != 0) {
-    if (rc == 0) {
-      (void)fs_reason_errno(reason, reason_len, errno);
-    }
-    rc = -1;
-  }
-  if (dest_fd >= 0 && close(dest_fd) != 0) {
-    if (rc == 0) {
-      (void)fs_reason_errno(reason, reason_len, errno);
-    }
-    rc = -1;
-  }
-  return rc;
-}
-
-int fs_stat_meta(const char* file_path, struct FsMeta* meta_out, char* reason, size_t reason_len) {
-  struct stat st;
-  if (stat(file_path, &st) != 0) {
-    return fs_reason_errno(reason, reason_len, errno);
-  }
-  if (!S_ISREG(st.st_mode)) {
-    return error_report(reason, reason_len, "not a regular file");
-  }
-  // A regular file's size is never negative. The `#if` omits the width check where `size_t` is as
-  // wide as `uintmax_t`, because there the comparison is a tautology rather than a bound.
-#if SIZE_MAX < UINTMAX_MAX
-  if ((uintmax_t)st.st_size > (uintmax_t)SIZE_MAX) {
-    return error_report(reason, reason_len, "file size cannot be represented");
-  }
-#endif
-  struct FsMeta meta = {.size_len = (size_t)st.st_size};
-#if defined(__APPLE__)
-  meta.mtime_s = (int64_t)st.st_mtimespec.tv_sec;
-  meta.mtime_ns = (int64_t)st.st_mtimespec.tv_nsec;
-#else
-  meta.mtime_s = (int64_t)st.st_mtim.tv_sec;
-  meta.mtime_ns = (int64_t)st.st_mtim.tv_nsec;
-#endif
-  *meta_out = meta;
-  return 0;
-}
-
-int fs_mkdir_p(const char* dir_path, char* reason, size_t reason_len) {
-  if (dir_path[0] == '\0') {
-    return 0;
-  }
-  char* copy = text_strdup(dir_path);
-  if (copy == NULL) {
-    return error_report(reason, reason_len, "out of memory");
-  }
-
-  int rc = -1;
-  // Start at the second byte so a leading `/` does not become `ensure_dir("")`, which would fail
-  // with `ENOENT` on a root that always exists. The empty-path early return above keeps `copy + 1`
-  // in bounds. For `""` it would point one past the terminator, and dereferencing it reads outside
-  // the object.
-  for (char* p = copy + 1;; p++) {
-    if (*p != '/' && *p != '\0') {
-      continue;
-    }
-    const char saved = *p;
-    *p = '\0';
-    if (ensure_dir(copy, reason, reason_len) != 0) {
-      goto cleanup;
-    }
-    *p = saved;
-    if (saved == '\0') {
-      break;
-    }
-  }
-  rc = 0;
-
-cleanup:
-  free(copy);
-  return rc;
-}
-
-bool fs_path_exists(const char* path) {
-  struct stat st;
-  return stat(path, &st) == 0;
-}
-
-int fs_require_dir(const char* dir_path, char* reason, size_t reason_len) {
-  struct stat st;
-  if (stat(dir_path, &st) != 0) {
-    // The bare system message rather than `fs_reason_path_errno`'s "cannot <action>" form: the
-    // caller names the operation, so a verb here would stutter in the composed diagnostic.
-    char message[FS_REASON_SIZE];
-    return error_report(reason, reason_len, "%s ('%s')",
-                        error_system_message(message, sizeof(message), errno), dir_path);
-  }
-  if (!S_ISDIR(st.st_mode)) {
-    return error_report(reason, reason_len, "not a directory ('%s')", dir_path);
-  }
-  return 0;
-}
-
-int fs_identify(const char* file_path, struct FsIdentity* identity_out) {
-  struct stat st;
-  if (stat(file_path, &st) != 0) {
-    return -1;
-  }
-  identity_out->device = (uint64_t)st.st_dev;
-  identity_out->inode = (uint64_t)st.st_ino;
-  return 0;
-}
-
-static int fs_list_files_with_suffixes_inner(struct FsWalk* walk,
-                                             const char* dir_path,
-                                             char* reason,
-                                             size_t reason_len) {
-  // This `stat` does not validate the type. `opendir` in `read_dir_names` rejects a non-directory,
-  // which only the root can be, because `visit_matching_entry` passes on only entries it found to
-  // be directories.
-  struct stat st;
-  if (stat(dir_path, &st) != 0) {
-    return fs_reason_path_errno(reason, reason_len, "inspect directory", dir_path, errno);
-  }
-  const struct FsIdentity identity = {.device = (uint64_t)st.st_dev, .inode = (uint64_t)st.st_ino};
-  bool is_new = false;
-  if (fs_list_files_with_suffixes_record(walk, &identity, &is_new, reason, reason_len) != 0) {
-    return -1;
-  }
-  if (!is_new) {
-    // This silently skips a directory the walk already reached by another path: a symlink back into
-    // its own ancestry, or a second alias of one directory. Every file below it is already in
-    // `paths` under the first path, so nothing is missing. Walking it again would list each file
-    // once per path, and a chain of aliased directories multiplies that at every level. The
-    // excluded directory is recorded before the walk starts, so it takes this skip on every path.
-    return 0;
-  }
-
-  struct PathList names;
-  path_list_init(&names);
-  int rc = read_dir_names(&names, dir_path, reason, reason_len);
-
-  // This uses one arena for the whole directory rather than one per entry. Every joined path here
-  // is a few hundred bytes, while an arena's first chunk is 8 KB, so a per-entry arena would mean
-  // an 8 KB `malloc`/`free` pair for every file in the tree. The lifetime ends with this directory,
-  // which is short enough to bound the memory and long enough for a subdirectory's path to stay
-  // valid while the recursion below uses it as a root.
-  struct Arena scratch;
-  arena_init(&scratch);
-  for (size_t i = 0; rc == 0 && i < names.count; i++) {
-    rc = visit_matching_entry(walk, dir_path, names.items[i], &scratch, reason, reason_len);
-  }
-  arena_free(&scratch);
-  path_list_free(&names);
-  return rc;
-}
-
-static int fs_list_files_with_suffixes_exclude(struct FsWalk* walk,
-                                               const char* excluded_dir,
-                                               char* reason,
-                                               size_t reason_len) {
-  struct FsIdentity identity;
-  if (excluded_dir == NULL || fs_identify(excluded_dir, &identity) != 0) {
-    return 0;
-  }
-  bool is_new = false;
-  return fs_list_files_with_suffixes_record(walk, &identity, &is_new, reason, reason_len);
-}
-
-static int fs_list_files_with_suffixes_record(struct FsWalk* walk,
-                                              const struct FsIdentity* identity,
-                                              bool* is_new_out,
-                                              char* reason,
-                                              size_t reason_len) {
-  // Binary search for the first slot not below `identity`, which is where it is or belongs.
-  size_t low = 0;
-  size_t high = walk->visited_count;
-  while (low < high) {
-    const size_t mid = low + (high - low) / 2;
-    if (compare_identities(&walk->visited[mid], identity) < 0) {
-      low = mid + 1;
-    } else {
-      high = mid;
-    }
-  }
-  if (low < walk->visited_count && compare_identities(&walk->visited[low], identity) == 0) {
-    *is_new_out = false;
-    return 0;
-  }
-
-  if (walk->visited_count == walk->visited_capacity) {
-    size_t capacity_next = 0;
-    size_t capacity_bytes_next = 0;
-    if (grow_capacity(walk->visited_capacity, FS_WALK_VISITED_CAPACITY_MIN, sizeof(*walk->visited),
-                      &capacity_next, &capacity_bytes_next) != 0) {
-      return error_report(reason, reason_len, "out of memory");
-    }
-    struct FsIdentity* visited = realloc(walk->visited, capacity_bytes_next);
-    if (visited == NULL) {
-      return error_report(reason, reason_len, "out of memory");
-    }
-    walk->visited = visited;
-    walk->visited_capacity = capacity_next;
-  }
-  // Inserting in place keeps the array sorted. The shift is linear, but the walk records each
-  // directory once, and a content tree has far fewer directories than files.
-  memmove(&walk->visited[low + 1], &walk->visited[low],
-          (walk->visited_count - low) * sizeof(*walk->visited));
-  walk->visited[low] = *identity;
-  walk->visited_count++;
-  *is_new_out = true;
-  return 0;
-}
-
-static int read_dir_names(struct PathList* names,
-                          const char* dir_path,
-                          char* reason,
-                          size_t reason_len) {
-  DIR* dp = opendir(dir_path);
-  if (dp == NULL) {
-    return fs_reason_path_errno(reason, reason_len, "open directory", dir_path, errno);
-  }
-  int rc = 0;
-  while (rc == 0) {
-    // `readdir` returns `NULL` both at end-of-directory and on error, so reset `errno` first to
-    // tell them apart. A `NULL` entry with `errno` unchanged is the end. Otherwise the walk failed.
-    errno = 0;
-    const struct dirent* entry = readdir(dp);
-    if (entry == NULL) {
-      if (errno != 0) {
-        rc = fs_reason_path_errno(reason, reason_len, "read directory", dir_path, errno);
-      }
-      break;
-    }
-    if (strcmp(entry->d_name, ".") != 0 && strcmp(entry->d_name, "..") != 0 &&
-        path_list_push(names, entry->d_name) != 0) {
-      rc = error_report(reason, reason_len, "out of memory");
-    }
-  }
-  if (closedir(dp) != 0) {
-    if (rc == 0) {
-      (void)fs_reason_path_errno(reason, reason_len, "close directory", dir_path, errno);
-    }
-    rc = -1;
-  }
-  // `readdir` order is whatever the filesystem stores. Sorting makes the walk order, and with it
-  // which of two aliases of one directory is walked, the same on every machine.
-  if (rc == 0 && names->count > 0) {
-    qsort(names->items, names->count, sizeof(*names->items), compare_paths);
-  }
-  return rc;
-}
-
-static int visit_matching_entry(struct FsWalk* walk,
-                                const char* dir_path,
-                                const char* entry_name,
-                                struct Arena* scratch,
-                                char* reason,
-                                size_t reason_len) {
-  char* file_path = path_join(dir_path, entry_name, scratch);
-  if (file_path == NULL) {
-    return error_report(reason, reason_len, "out of memory");
-  }
-  // `lstat` first tells a symlink apart from what it names. A regular entry needs nothing more, so
-  // only a symlink costs a second call.
-  struct stat st;
-  int stat_rc = lstat(file_path, &st);
-  const bool is_link = stat_rc == 0 && S_ISLNK(st.st_mode);
-  if (is_link) {
-    stat_rc = stat(file_path, &st);
-  }
-  if (stat_rc != 0) {
-    if (errno == ENOENT || errno == ELOOP) {
-      // This skips an entry that resolves to nothing rather than aborting the whole walk: a
-      // dangling symlink or one removed since `readdir` (`ENOENT`), or a symlink that resolves in a
-      // cycle (`ELOOP`). No file exists behind either, so the walk loses nothing by stepping past
-      // it. `ENOENT` in particular is routine, not exceptional. `readdir` and `stat` cannot be
-      // atomic, so any concurrent delete lands here and must not fail the build.
-      return 0;
-    }
-    // Every other reason means a file is there and could not be inspected: `EACCES` from a parent
-    // directory that is readable but not searchable, `ENAMETOOLONG`, `EIO`. Skipping those would
-    // drop a source media file from the build and still report success.
-    return fs_reason_path_errno(reason, reason_len, "inspect entry", file_path, errno);
-  }
-  if (S_ISDIR(st.st_mode)) {
-    if (is_link) {
-      // A symlinked directory waits until every directory reachable without a symlink is walked, so
-      // the target's own path, when it has one in the tree, is the one that lists its files.
-      return path_list_push(&walk->links, file_path) == 0
-                 ? 0
-                 : error_report(reason, reason_len, "out of memory");
-    }
-    return fs_list_files_with_suffixes_inner(walk, file_path, reason, reason_len);
-  }
-  if (S_ISREG(st.st_mode) &&
-      has_any_suffix(entry_name, walk->suffixes, walk->suffix_count, walk->is_fold_case)) {
-    if (path_list_push(walk->paths, file_path) != 0) {
-      return error_report(reason, reason_len, "out of memory");
-    }
-  }
-  return 0;
-}
-
-static int compare_identities(const struct FsIdentity* a, const struct FsIdentity* b) {
-  if (a->device != b->device) {
-    return a->device < b->device ? -1 : 1;
-  }
-  if (a->inode != b->inode) {
-    return a->inode < b->inode ? -1 : 1;
-  }
-  return 0;
-}
-
-static bool has_suffix(const char* text, const char* suffix, bool is_fold_case) {
-  const size_t text_len = strlen(text);
-  const size_t suffix_len = strlen(suffix);
-  // The length test must short-circuit the pointer arithmetic. `text_len - suffix_len` wraps when
-  // the suffix is the longer string, and `text +` that value forms a pointer far outside the
-  // object, which is undefined regardless of whether it is dereferenced.
-  if (text_len < suffix_len) {
-    return false;
-  }
-  const char* candidate = text + text_len - suffix_len;
-  for (size_t i = 0; i < suffix_len; i++) {
-    const unsigned char left = (unsigned char)candidate[i];
-    const unsigned char right = (unsigned char)suffix[i];
-    if (left != right && (!is_fold_case || ascii_to_lower(left) != ascii_to_lower(right))) {
-      return false;
-    }
-  }
-  return true;
-}
-
-static bool has_any_suffix(const char* text,
-                           const char* const* suffixes,
-                           size_t suffix_count,
-                           bool is_fold_case) {
-  for (size_t i = 0; i < suffix_count; i++) {
-    if (has_suffix(text, suffixes[i], is_fold_case)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static int compare_paths(const void* a, const void* b) {
-  const char* const* pa = a;
-  const char* const* pb = b;
-  return strcmp(*pa, *pb);
-}
-
-static int fs_read_file_bytes(unsigned char* data,
-                              size_t data_len,
-                              FILE* fp,
-                              char* reason,
-                              size_t reason_len) {
+static int os_read_bytes_exact(char* data,
+                               ptrdiff_t data_len,
+                               FILE* fp,
+                               struct Str file_path,
+                               const struct FsReport* report) {
+  assert(data_len >= 0);
   // Reset `errno` so a value left by an earlier call cannot pass for the cause of this one. ISO C
   // does not require `fread` to set it, so a stream error that left it at 0 is reported as `EIO`.
   errno = 0;
-  const size_t nread = fread(data, 1, data_len, fp);
+  const size_t read_len = fread(data, 1, (size_t)data_len, fp);
   // Capture `errno` before calling `ferror`, which is permitted to modify it even when it succeeds.
   // Reading it afterwards could name a cause the read never had.
   const int read_errno = errno;
   int rc = -1;
   if (ferror(fp) != 0) {
-    (void)fs_reason_errno(reason, reason_len, read_errno == 0 ? EIO : read_errno);
-  } else if (nread != data_len) {
+    (void)report_errno(report, file_path, read_errno == 0 ? EIO : read_errno);
+  } else if (read_len != (size_t)data_len) {
     // No stream error, so the bytes ran out. The file shrank after the caller's `fstat`.
-    (void)error_report(reason, reason_len, "shrank while being read");
+    (void)log_error(report->log, "%.*s: shrank while being read ('%.*s')",
+                    STR_FMT(report->operation), STR_FMT(file_path));
   } else if (feof(fp) != 0) {
     // The read already consumed the whole file, so it cannot have grown.
     rc = 0;
@@ -839,92 +514,272 @@ static int fs_read_file_bytes(unsigned char* data,
     const size_t extra_read = fread(&extra, 1, 1, fp);
     const int extra_errno = errno;
     if (ferror(fp) != 0) {
-      (void)fs_reason_errno(reason, reason_len, extra_errno == 0 ? EIO : extra_errno);
+      (void)report_errno(report, file_path, extra_errno == 0 ? EIO : extra_errno);
     } else if (extra_read == 0) {
       rc = 0;
     } else {
-      (void)error_report(reason, reason_len, "grew while being read");
+      (void)log_error(report->log, "%.*s: grew while being read ('%.*s')",
+                      STR_FMT(report->operation), STR_FMT(file_path));
     }
   }
   return rc;
 }
 
-static int ensure_parent_dir(const char* file_path, char* reason, size_t reason_len) {
-  const char* slash = strrchr(file_path, '/');
-  if (slash == NULL) {
-    return 0;
+static int os_write_open(struct FsWriteTarget* target, const struct FsReport* report) {
+  if (copy_cstr(target->file_path, target->path) != 0) {
+    return report_errno(report, target->file_path, errno);
   }
-  const size_t len = (size_t)(slash - file_path);
-  // A path whose only `/` is the leading one yields a zero-length parent, which `fs_mkdir_p` treats
-  // as a no-op. The parent is the root, which always exists.
-  char* parent = malloc(len + 1);
-  if (parent == NULL) {
-    return error_report(reason, reason_len, "out of memory");
+  // Mode `0666` is a ceiling the process umask trims, which is how every file this module creates
+  // gets its permissions. An existing destination keeps its own mode, because `O_TRUNC` writes
+  // through the file that is already there.
+  target->fd = open(target->path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0666);
+  return target->fd >= 0 ? 0 : report_errno(report, target->file_path, errno);
+}
+
+static int os_write_source(int fd,
+                           struct OsSource source,
+                           int source_fd,
+                           struct Str file_path,
+                           const struct FsReport* report) {
+  switch (source.kind) {
+    case OS_SOURCE_BYTES:
+      return write_all(fd, source.bytes) == 0 ? 0 : report_errno(report, file_path, errno);
+    case OS_SOURCE_FILE:
+      return os_write_source_stream(fd, source_fd, source.file_path, file_path, report);
   }
-  memcpy(parent, file_path, len);
-  parent[len] = '\0';
-  const int rc = fs_mkdir_p(parent, reason, reason_len);
-  free(parent);
+  return -1;
+}
+
+static int os_write_source_stream(int fd,
+                                  int source_fd,
+                                  struct Str source_path,
+                                  struct Str file_path,
+                                  const struct FsReport* report) {
+  char buffer[FS_WRITE_BUFFER_SIZE];
+  for (;;) {
+    const ssize_t read_len = read(source_fd, buffer, sizeof(buffer));
+    if (read_len > 0) {
+      if (write_all(fd, (struct Str){buffer, read_len}) != 0) {
+        return report_errno(report, file_path, errno);
+      }
+    } else if (read_len == 0) {
+      return 0;
+    } else if (errno != EINTR) {
+      return report_errno(report, source_path, errno);
+    }
+  }
+}
+
+static int os_write_close(const struct FsWriteTarget* target,
+                          int source_fd,
+                          struct Str source_path,
+                          int rc,
+                          const struct FsReport* report) {
+  // Only the first failure is reported, because a later one is a consequence of it.
+  if (target->fd >= 0 && close(target->fd) != 0) {
+    if (rc == 0) {
+      (void)report_errno(report, target->file_path, errno);
+    }
+    rc = -1;
+  }
+  if (source_fd >= 0 && close(source_fd) != 0) {
+    if (rc == 0) {
+      (void)report_errno(report, source_path, errno);
+    }
+    rc = -1;
+  }
   return rc;
 }
 
-static int ensure_dir(const char* dir_path, char* reason, size_t reason_len) {
+static int mkdirs_report(struct Str dir_path, const struct FsReport* report) {
+  // Each `/` past the first byte ends one ancestor to create, and the whole path is the last.
+  // Starting at the second byte keeps a leading `/` from becoming `mkdirs_report_one("")`, which
+  // would fail with `ENOENT` on a root that always exists.
+  for (ptrdiff_t i = 1; i < dir_path.len; i++) {
+    if (dir_path.data[i] == '/' && mkdirs_report_one(str_head(dir_path, i), report) != 0) {
+      return -1;
+    }
+  }
+  return dir_path.len == 0 ? 0 : mkdirs_report_one(dir_path, report);
+}
+
+static int mkdirs_report_one(struct Str dir_path, const struct FsReport* report) {
   // Create first and treat `EEXIST` as success, rather than testing with `stat` and then creating.
   // Between a test and the create another process or a concurrent worker thread writing a sibling
-  // output can win the race, and `fs_mkdir_p` runs this once per path component. Mode `0775` is a
+  // output can win the race, and `os_mkdirs` runs this once per path component. Mode `0775` is a
   // ceiling the process umask trims, not the mode the directory ends up with. The `stat` below runs
   // only once `EEXIST` says something is already there, and rejects it when it is not a directory.
-  if (mkdir(dir_path, 0775) == 0) {
+  char path[PATH_MAX];
+  if (copy_cstr(dir_path, path) != 0) {
+    return report_step_errno(report, S("create directory"), dir_path, errno);
+  }
+  if (mkdir(path, 0775) == 0) {
     return 0;
   }
   if (errno != EEXIST) {
-    return fs_reason_path_errno(reason, reason_len, "create directory", dir_path, errno);
+    return report_step_errno(report, S("create directory"), dir_path, errno);
   }
   struct stat st;
-  if (stat(dir_path, &st) != 0) {
-    return fs_reason_path_errno(reason, reason_len, "inspect directory", dir_path, errno);
+  if (stat(path, &st) != 0) {
+    return report_step_errno(report, S("inspect directory"), dir_path, errno);
   }
   if (!S_ISDIR(st.st_mode)) {
-    // This is a bare cause fragment, unlike the two branches above, which name the operation. It
-    // needs no verb because "exists and is not a directory" already says a directory was wanted.
-    // The errno branches do carry one, because a caller may be writing a file rather than creating
-    // a directory, and there the verb is what separates a failed parent directory from a failed
-    // write. The path trails the cause either way, so a deep component cannot truncate it.
-    return error_report(reason, reason_len, "exists and is not a directory ('%s')", dir_path);
+    // This names no step, unlike the two branches above. It needs no verb because "exists and is
+    // not a directory" already says a directory was wanted. The errno branches do carry one,
+    // because a caller may be writing a file rather than creating a directory, and there the verb
+    // is what separates a failed parent directory from a failed write.
+    return log_error(report->log, "%.*s: exists and is not a directory ('%.*s')",
+                     STR_FMT(report->operation), STR_FMT(dir_path));
   }
   return 0;
 }
 
-static int write_all(int fd, const void* data, size_t data_len, char* reason, size_t reason_len) {
-  const unsigned char* bytes = data;
-  size_t offset = 0;
-  while (offset < data_len) {
-    const ssize_t nwritten = write(fd, bytes + offset, data_len - offset);
-    if (nwritten > 0) {
-      offset += (size_t)nwritten;
-    } else if (nwritten < 0 && errno == EINTR) {
+static int os_list_names(struct PathList* names,
+                         struct Str dir_path,
+                         struct Arena* arena,
+                         const struct FsReport* report) {
+  char path[PATH_MAX];
+  DIR* dp = copy_cstr(dir_path, path) == 0 ? opendir(path) : NULL;
+  if (dp == NULL) {
+    return report_step_errno(report, S("open directory"), dir_path, errno);
+  }
+  int rc = 0;
+  while (rc == 0) {
+    // `readdir` returns `NULL` both at end-of-directory and on error, so reset `errno` first to
+    // tell them apart. A `NULL` entry with `errno` unchanged is the end. Otherwise the read failed.
+    errno = 0;
+    const struct dirent* entry = readdir(dp);
+    if (entry == NULL) {
+      if (errno != 0) {
+        rc = report_step_errno(report, S("read directory"), dir_path, errno);
+      }
+      break;
+    }
+    const struct Str name = str_from_cstr(entry->d_name);
+    if (!str_eq(name, S(".")) && !str_eq(name, S(".."))) {
+      path_list_push(names, name, arena);
+    }
+  }
+  if (closedir(dp) != 0) {
+    if (rc == 0) {
+      (void)report_step_errno(report, S("close directory"), dir_path, errno);
+    }
+    rc = -1;
+  }
+  return rc;
+}
+
+static enum ListClassify os_list_classify(struct Str file_path, enum OsEntryKind* kind_out) {
+  char path[PATH_MAX];
+  struct stat st;
+  if (copy_cstr(file_path, path) != 0) {
+    return LIST_CLASSIFY_FAILED;
+  }
+  // `lstat` first tells a symlink apart from what it names. A regular entry needs nothing more, so
+  // only a symlink costs a second call.
+  //
+  // Either call failing skips an entry that resolves to nothing rather than listing it as failed: a
+  // dangling symlink or one removed since `readdir` (`ENOENT`), or a symlink that resolves in a
+  // cycle (`ELOOP`). No file exists behind either. `ENOENT` in particular is routine, not
+  // exceptional. `readdir` and `stat` cannot be atomic, so any concurrent delete lands here and
+  // must not fail the build. A symlink through a regular file fails as `ENOTDIR`, which is not
+  // skipped, so it is listed as `OS_ENTRY_FAILED` as `os.h` documents.
+  if (lstat(path, &st) != 0) {
+    return errno == ENOENT || errno == ELOOP ? LIST_CLASSIFY_SKIPPED : LIST_CLASSIFY_FAILED;
+  }
+  const bool is_link = S_ISLNK(st.st_mode);
+  if (is_link && stat(path, &st) != 0) {
+    return errno == ENOENT || errno == ELOOP ? LIST_CLASSIFY_SKIPPED : LIST_CLASSIFY_FAILED;
+  }
+  if (S_ISDIR(st.st_mode)) {
+    *kind_out = is_link ? OS_ENTRY_DIR_LINK : OS_ENTRY_DIR;
+    return LIST_CLASSIFY_LISTED;
+  }
+  if (S_ISREG(st.st_mode)) {
+    *kind_out = OS_ENTRY_FILE;
+    return LIST_CLASSIFY_LISTED;
+  }
+  return LIST_CLASSIFY_SKIPPED;
+}
+
+static int open_regular(struct Str file_path,
+                        int* fd_out,
+                        struct stat* st_out,
+                        const struct FsReport* report) {
+  char path[PATH_MAX];
+  const int fd =
+      copy_cstr(file_path, path) == 0 ? open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC) : -1;
+  if (fd < 0) {
+    return report_errno(report, file_path, errno);
+  }
+  int rc = 0;
+  if (fstat(fd, st_out) != 0) {
+    rc = report_errno(report, file_path, errno);
+  } else if (!S_ISREG(st_out->st_mode)) {
+    rc = log_error(report->log, "%.*s: not a regular file ('%.*s')", STR_FMT(report->operation),
+                   STR_FMT(file_path));
+  }
+  if (rc == 0 && fcntl(fd, F_SETFL, 0) != 0) {
+    rc = report_errno(report, file_path, errno);
+  }
+  if (rc != 0) {
+    // The failure above is the one reported, so a close error on this path adds nothing.
+    (void)close(fd);
+    return -1;
+  }
+  *fd_out = fd;
+  return 0;
+}
+
+static int write_all(int fd, struct Str data) {
+  while (data.len > 0) {
+    const ssize_t written_len =
+        write(fd, data.data, (size_t)(data.len < FS_WRITE_LEN_MAX ? data.len : FS_WRITE_LEN_MAX));
+    if (written_len > 0) {
+      data = str_tail(data, written_len);
+    } else if (written_len < 0 && errno == EINTR) {
       continue;
-    } else if (nwritten < 0) {
-      return fs_reason_errno(reason, reason_len, errno);
+    } else if (written_len < 0) {
+      return -1;
     } else {
-      return error_report(reason, reason_len, "write made no progress");
+      errno = EIO;
+      return -1;
     }
   }
   return 0;
 }
 
-static int fs_reason_errno(char* reason, size_t reason_len, int error_number) {
-  char message[FS_REASON_SIZE];
-  return error_report(reason, reason_len, "%s",
-                      error_system_message(message, sizeof(message), error_number));
+static int copy_cstr(struct Str path, char cstr_out[static PATH_MAX]) {
+  // The lower bound is the `struct Str` invariant, spelled out so the copy below is visibly in
+  // bounds in a build without assertions.
+  if (path.len < 0 || path.len >= PATH_MAX) {
+    errno = ENAMETOOLONG;
+    return -1;
+  }
+  if (!text_is_nul_free(path)) {
+    errno = EINVAL;
+    return -1;
+  }
+  // `memcpy` requires valid pointers even for zero bytes, and an empty path may hold `NULL`.
+  if (path.len > 0) {
+    memcpy(cstr_out, path.data, (size_t)path.len);
+  }
+  cstr_out[path.len] = '\0';
+  return 0;
 }
 
-static int fs_reason_path_errno(char* reason,
-                                size_t reason_len,
-                                const char* action,
-                                const char* path,
-                                int error_number) {
-  char message[FS_REASON_SIZE];
-  return error_report(reason, reason_len, "cannot %s: %s ('%s')", action,
-                      error_system_message(message, sizeof(message), error_number), path);
+static int report_errno(const struct FsReport* report, struct Str path, int error_number) {
+  char message[ERROR_SYSTEM_MESSAGE_SIZE];
+  return log_error(report->log, "%.*s: %s ('%.*s')", STR_FMT(report->operation),
+                   error_system_message(message, sizeof(message), error_number), STR_FMT(path));
+}
+
+static int report_step_errno(const struct FsReport* report,
+                             struct Str step,
+                             struct Str path,
+                             int error_number) {
+  char message[ERROR_SYSTEM_MESSAGE_SIZE];
+  return log_error(report->log, "%.*s: cannot %.*s: %s ('%.*s')", STR_FMT(report->operation),
+                   STR_FMT(step), error_system_message(message, sizeof(message), error_number),
+                   STR_FMT(path));
 }

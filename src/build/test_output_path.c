@@ -1,75 +1,69 @@
 #include <acutest.h>
-#include <stdio.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "build/output_path.h"
-#include "core/error.h"
 #include "core/path.h"
 #include "shared/arena.h"
+#include "shared/buf.h"
+#include "shared/log.h"
+#include "shared/str.h"
+#include "test_support.h"
 
-// A path within both limits is accepted and leaves the diagnostic buffer untouched.
+// A path within both limits is accepted and records nothing.
 static void test_check_limits_accepts_bounded_path(void) {
-  char err[ERROR_MESSAGE_SIZE] = "";
-  TEST_CHECK(output_path_check_limits("album/index.html", "album", err, sizeof(err)) == 0);
-  TEST_CHECK(err[0] == '\0');
+  struct Log log = test_log();
+  TEST_CHECK(output_path_check_limits(S("album/index.html"), S("album"), &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
 }
 
 // Each `/` in an output file path adds one `../`, so a top-level file gets an empty prefix.
 static void test_to_root_climbs_one_level_per_separator(void) {
-  struct Arena arena;
-  arena_init(&arena);
-  const char* top = output_path_to_root("index.html", &arena);
-  const char* nested = output_path_to_root("a/b/index.html", &arena);
-  TEST_ASSERT(top != NULL && nested != NULL);
-  TEST_CHECK(strcmp(top, "") == 0);
-  TEST_CHECK(strcmp(nested, "../../") == 0);
-  arena_free(&arena);
+  struct Arena arena = test_arena();
+  struct Str top = output_path_to_root(S("index.html"), &arena);
+  struct Str nested = output_path_to_root(S("a/b/index.html"), &arena);
+  TEST_CHECK(top.len == 0);
+  TEST_CHECK(str_eq(nested, S("../../")));
 }
 
-// A path over the whole-path limit names the limit, the measured length, and the producer ahead of
-// the path, so the numbers survive the path being cut off.
+// A path over the whole-path limit names the limit, the measured length, the producer, and the
+// whole path.
 static void test_check_limits_rejects_overlong_path(void) {
   enum { SEGMENT_LEN = 200, SEGMENT_COUNT = 6 };
   char path[SEGMENT_COUNT * (SEGMENT_LEN + 1)];
-  size_t path_len = 0;
-  for (size_t i = 0; i < (size_t)SEGMENT_COUNT; i++) {
+  ptrdiff_t path_len = 0;
+  for (ptrdiff_t i = 0; i < SEGMENT_COUNT; i++) {
     if (i > 0) {
       path[path_len++] = '/';
     }
     memset(path + path_len, 'a', SEGMENT_LEN);
     path_len += SEGMENT_LEN;
   }
-  path[path_len] = '\0';
-  char err[ERROR_MESSAGE_SIZE] = "";
-  TEST_CHECK(output_path_check_limits(path, "src.jpg", err, sizeof(err)) == -1);
-  char expected_head[128];
-  const int expected_head_len = snprintf(
-      expected_head, sizeof(expected_head),
-      "output path exceeds max output path length (%zu bytes) at %zu bytes (for 'src.jpg'): 'aaa",
-      (size_t)OUTPUT_PATH_RELATIVE_LEN_MAX, path_len);
-  TEST_CHECK(expected_head_len > 0 && (size_t)expected_head_len < sizeof(expected_head));
-  TEST_CHECK(strncmp(err, expected_head, (size_t)expected_head_len) == 0);
-  TEST_MSG("err: %s", err);
+  const struct Str overlong = {path, path_len};
+  struct Log log = test_log();
+  TEST_CHECK(output_path_check_limits(overlong, S("src.jpg"), &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "output path for 'src.jpg' exceeds max output path length (%d bytes) at "
+                         "%td bytes: '%.*s'\n",
+                         OUTPUT_PATH_RELATIVE_LEN_MAX, path_len, STR_FMT(overlong)));
+  TEST_CHECK(log.errors == 1);
 }
 
 // A path within the whole-path limit but with one overlong segment names only that segment as the
 // offending value.
 static void test_check_limits_rejects_overlong_segment(void) {
-  char segment[FILENAME_LEN_MAX + 2];
-  memset(segment, 'b', sizeof(segment) - 1);
-  segment[sizeof(segment) - 1] = '\0';
-  char path[sizeof("album/") + sizeof(segment)];
-  (void)snprintf(path, sizeof(path), "album/%s", segment);
-  char err[ERROR_MESSAGE_SIZE] = "";
-  TEST_CHECK(output_path_check_limits(path, "src.jpg", err, sizeof(err)) == -1);
-  char expected[ERROR_MESSAGE_SIZE];
-  const int expected_len = snprintf(expected, sizeof(expected),
-                                    "output path segment exceeds max filename length (%zu bytes) "
-                                    "at %zu bytes (for 'src.jpg'): '%s'",
-                                    (size_t)FILENAME_LEN_MAX, sizeof(segment) - 1, segment);
-  TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected));
-  TEST_CHECK(strcmp(err, expected) == 0);
-  TEST_MSG("err: %s", err);
+  enum { SEGMENT_LEN = FILENAME_LEN_MAX + 1 };
+  char path[sizeof("album/") - 1 + SEGMENT_LEN];
+  memcpy(path, "album/", sizeof("album/") - 1);
+  memset(path + sizeof("album/") - 1, 'b', SEGMENT_LEN);
+  const struct Str segment = {path + sizeof("album/") - 1, SEGMENT_LEN};
+  const struct Str whole = {path, (ptrdiff_t)sizeof(path)};
+  struct Log log = test_log();
+  TEST_CHECK(output_path_check_limits(whole, S("src.jpg"), &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "output path segment for 'src.jpg' exceeds max filename length (%d "
+                         "bytes) at %d bytes: '%.*s'\n",
+                         FILENAME_LEN_MAX, SEGMENT_LEN, STR_FMT(segment)));
 }
 
 TEST_LIST = {

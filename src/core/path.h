@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "shared/str.h"
+
 struct Arena;
 
 /**
@@ -28,20 +30,8 @@ _Static_assert(FILENAME_LEN_MAX > (sizeof(".html") - 1),
  */
 enum { OUTPUT_PATH_RELATIVE_LEN_MAX = 1024 };
 
-_Static_assert((size_t)OUTPUT_PATH_RELATIVE_LEN_MAX >= (size_t)FILENAME_LEN_MAX,
+_Static_assert((ptrdiff_t)OUTPUT_PATH_RELATIVE_LEN_MAX >= (ptrdiff_t)FILENAME_LEN_MAX,
                "output path limit must fit at least one maximum-length filename");
-
-/** Measurements taken from an output path while checking it against the output-path limits. */
-struct PathOutputMetrics {
-  /** Whole path length in bytes. */
-  size_t len;
-
-  /** Longest `/`-delimited segment, borrowed into the checked path and not terminated. */
-  const char* segment;
-
-  /** Length of `segment` in bytes. */
-  size_t segment_len;
-};
 
 /** Which output-path limit a relative path exceeded, if any. */
 enum PathOutputVerdict {
@@ -64,30 +54,48 @@ enum PathOutputVerdict {
  * both are needed. Each segment becomes one filesystem entry. An overlong one has to fail here with
  * a diagnostic naming the limit rather than later as an opaque write error from the OS.
  *
- * It reports the measurements whatever the verdict, including the longest segment itself, so a
- * per-segment failure can name which segment rather than only its length.
+ * It reports the longest segment itself whatever the verdict, so a per-segment failure can name
+ * which segment rather than only its length. The whole-path length is the caller's own.
  *
- * @param relative_path Output path relative to the output directory. Must not be `NULL`.
- * @param metrics_out   Receives the measurements, whatever the verdict, so the caller can name the
- *                      offending value. Must not be `NULL`.
+ * @param relative_path Output path relative to the output directory.
+ * @param segment_out   Receives the longest `/`-delimited segment, borrowed into `relative_path`,
+ *                      whatever the verdict, so the caller can name the offending value. Must not
+ *                      be `NULL`.
  * @return The first limit exceeded, or `PATH_OUTPUT_OK`.
  */
-enum PathOutputVerdict path_check_output_limits(const char* relative_path,
-                                                struct PathOutputMetrics* metrics_out)
-    __attribute__((nonnull(1, 2)));
+enum PathOutputVerdict path_check_output_limits(struct Str relative_path, struct Str* segment_out)
+    __attribute__((nonnull(2)));
+
+/**
+ * @brief Returns the final path component, the part after the last `/`.
+ *
+ * @param path Path to take the basename of.
+ * @return View into `path` past its last `/`, or all of `path` when it holds none. A path ending in
+ *         `/` has an empty basename.
+ */
+struct Str path_basename(struct Str path);
+
+/**
+ * @brief Returns the directory part of a path, the part before the last `/`.
+ *
+ * @param path Path to take the parent of.
+ * @return View into `path` before its last `/`, or an empty view when the path has no `/` or its
+ *         only `/` is the leading one.
+ */
+struct Str path_parent(struct Str path);
 
 /**
  * @brief Joins two path components into arena-owned storage.
  *
  * Inserts a single `/` between the components only when `base_path` does not already end with one.
  *
- * @param base_path     Leading path component. Must not be `NULL`.
- * @param relative_path Trailing path component to append. Must not be `NULL`.
+ * @param base_path     Leading path component.
+ * @param relative_path Trailing path component to append.
  * @param arena         Arena that owns the joined path. Must not be `NULL`.
- * @return Terminated joined path owned by the arena, or `NULL` on allocation failure.
+ * @return Joined path owned by the arena.
  */
-char* path_join(const char* base_path, const char* relative_path, struct Arena* arena)
-    __attribute__((nonnull(1, 2, 3)));
+struct Str path_join(struct Str base_path, struct Str relative_path, struct Arena* arena)
+    __attribute__((nonnull(3)));
 
 /**
  * @brief Returns the part of a path that lies below a root directory.
@@ -95,16 +103,16 @@ char* path_join(const char* base_path, const char* relative_path, struct Arena* 
  * The comparison is textual and never touches the filesystem, so `path` and `root_dir` have to
  * spell the root the same way. It holds when `path` was produced by walking `root_dir`, since each
  * such path carries that spelling of the root as its prefix. It does not hold for an alternate
- * spelling such as a trailing `/`, a `./` component, or a symlink, which yields `NULL`.
+ * spelling such as a trailing `/`, a `./` component, or a symlink, which is not below.
  *
- * @param path     Path expected to name an entry below `root_dir`. Must not be `NULL`.
- * @param root_dir Directory the result is made relative to, without a trailing slash. Must not be
- *                 `NULL`.
- * @return Pointer into `path` just past `root_dir` and its separator, borrowing `path`'s storage,
- *         or `NULL` when `path` does not start with `root_dir` followed by a separator.
+ * @param path              Path expected to name an entry below `root_dir`.
+ * @param root_dir          Directory the result is made relative to, without a trailing slash.
+ * @param relative_path_out Receives the view of `path` just past `root_dir` and its separator, when
+ *                          it is below. Must not be `NULL`.
+ * @return `true` when `path` starts with `root_dir` followed by a separator, `false` otherwise.
  */
-const char* path_relative_below(const char* path, const char* root_dir)
-    __attribute__((nonnull(1, 2)));
+bool path_is_below(struct Str path, struct Str root_dir, struct Str* relative_path_out)
+    __attribute__((nonnull(3)));
 
 /**
  * @brief Reports whether `path` is a safe non-absolute relative path.
@@ -121,9 +129,9 @@ const char* path_relative_below(const char* path, const char* root_dir)
  * Rejecting every byte above 0x7F also avoids Unicode normalization, because no accepted name has a
  * second spelling.
  *
- * @param path Candidate relative path. `NULL` is treated as unsafe.
+ * @param path Candidate relative path.
  * @return `true` when `path` is a safe relative path, `false` otherwise.
  */
-bool path_is_safe_relative(const char* path);
+bool path_is_safe_relative(struct Str path);
 
 #endif

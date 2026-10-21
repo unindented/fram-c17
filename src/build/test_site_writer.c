@@ -1,223 +1,145 @@
 #include <acutest.h>
 #include <errno.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "build/page_renderer.h"
 #include "build/site_writer.h"
-#include "core/error.h"
-#include "core/path.h"
 #include "core/path_list.h"
 #include "domain/album.h"
 #include "domain/gallery_config.h"
-#include "runtime/fs.h"
+#include "os_memory.h"
 #include "shared/arena.h"
+#include "shared/buf.h"
+#include "shared/log.h"
+#include "shared/str.h"
 #include "test_support.h"
 
-/** Largest file a test here reads back, in bytes. Every fixture file is a few hundred bytes. */
-enum { TEST_FILE_LEN_MAX = 1024 * 1024 };
-
-/**
- * @brief Checks that one fixture file holds exactly the expected text.
- *
- * @param path     File to read. Must not be `NULL`.
- * @param expected Terminated text the file must hold byte for byte. Must not be `NULL`.
- */
-static void check_file_text(const char* path, const char* expected) {
-  unsigned char* bytes = NULL;
-  size_t bytes_len = 0;
-  char reason[FS_REASON_SIZE];
-  if (!TEST_CHECK(
-          fs_read_file(path, TEST_FILE_LEN_MAX, &bytes, &bytes_len, reason, sizeof(reason)) == 0)) {
-    return;
-  }
-  TEST_CHECK(bytes_len == strlen(expected));
-  TEST_CHECK(strcmp((const char*)bytes, expected) == 0);
-  free(bytes);
-}
+// Every test here runs against the in-memory host: the writers read templates and static files and
+// write their outputs only through `runtime/os.h`.
 
 // Album pages, aggregate templates, and nested static files land at their planned destinations.
 static void test_writes_complete_output_layer(void) {
-  char root_dir_template[] = "/tmp/fram-writer-output-layer.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
-    return;
-  }
-  struct Arena paths;
-  arena_init(&paths);
-  char* output_dir = path_join(root_dir, "public", &paths);
-  char* templates_dir = path_join(root_dir, "templates", &paths);
-  char* static_dir = path_join(root_dir, "static", &paths);
-  char* root_output = path_join(output_dir, "index.html", &paths);
-  char* static_source = path_join(static_dir, "icons/a.txt", &paths);
-  char* aggregate_output = path_join(output_dir, "map.xml", &paths);
-  char* nested_output = path_join(output_dir, "nested/links.html", &paths);
-  char* static_output = path_join(output_dir, "icons/a.txt", &paths);
-  static const char* const aggregates[] = {"map.xml", "nested/links.html"};
-  struct GalleryConfig config;
-  gallery_config_init(&config);
-  config.title = "Gallery & Co";
-  config.author = "Ada";
-  config.output_dir = output_dir;
-  config.templates_dir = templates_dir;
-  config.static_dir = static_dir;
-  config.aggregate_templates = aggregates;
-  config.aggregate_template_count = 2;
-  struct Album root = {.source_dir = "",
-                       .title = "Root",
-                       .url_path = "index.html",
-                       .output_path = root_output,
-                       .path_to_root = ""};
+  struct Os* os = os_memory();
+  os_memory_write(os, "templates/map.xml", "<g>{{gallery.title}}</g>");
+  os_memory_write(os, "templates/nested/links.html", "{{album.url}}");
+  os_memory_write(os, "static/icons/a.txt", "static");
+  struct Arena paths = test_arena();
+  const struct Arena output = test_arena();
+  const struct Arena scratch = test_arena();
+  static const struct Str aggregates[] = {STR_INIT("map.xml"), STR_INIT("nested/links.html")};
+  struct GalleryConfig gallery_config;
+  gallery_config_init(&gallery_config);
+  gallery_config.title = S("Gallery & Co");
+  gallery_config.author = S("Ada");
+  gallery_config.output_dir = S("public");
+  gallery_config.templates_dir = S("templates");
+  gallery_config.static_dir = S("static");
+  gallery_config.aggregate_templates = aggregates;
+  gallery_config.aggregate_template_count = 2;
+  struct Album root = {.source_dir = S(""),
+                       .title = S("Root"),
+                       .url_path = S("index.html"),
+                       .output_path = S("public/index.html"),
+                       .path_to_root = S("")};
   const struct Album* albums[] = {&root};
-  char html[] = "<h1>Root</h1>";
-  const struct RenderedPage rendered[] = {{.html = html, .html_len = sizeof(html) - 1}};
-  struct PathList static_paths;
-  path_list_init(&static_paths);
-  char err[ERROR_MESSAGE_SIZE];
-  if (!TEST_CHECK(write_fixture_file(root_dir, "templates/map.xml", "<g>{{gallery.title}}</g>") ==
-                  0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "templates/nested/links.html", "{{album.url}}") ==
-                  0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "static/icons/a.txt", "static") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(output_dir != NULL && templates_dir != NULL && static_dir != NULL &&
-                  root_output != NULL && static_source != NULL && aggregate_output != NULL &&
-                  nested_output != NULL && static_output != NULL)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(path_list_push(&static_paths, static_source) == 0)) {
-    goto cleanup;
-  }
+  const struct RenderedPage rendered[] = {{.html = S("<h1>Root</h1>")}};
+  struct PathList static_paths = {0};
+  struct Log log = test_log();
+  path_list_push(&static_paths, S("static/icons/a.txt"), &paths);
 
-  TEST_CHECK(site_writer_write_album_pages(albums, 1, rendered, err, sizeof(err)) == 0);
-  TEST_CHECK(site_writer_write_aggregates(&config, albums[0], err, sizeof(err)) == 0);
-  TEST_CHECK(site_writer_copy_static_files(&config, &static_paths, err, sizeof(err)) == 0);
-  check_file_text(root_output, "<h1>Root</h1>");
-  check_file_text(aggregate_output, "<g>Gallery &amp; Co</g>");
-  check_file_text(nested_output, "../index.html");
-  check_file_text(static_output, "static");
-
-cleanup:
-  path_list_free(&static_paths);
-  gallery_config_free(&config);
-  arena_free(&paths);
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(site_writer_write_album_pages(albums, 1, rendered, os, scratch, &log) == 0);
+  TEST_CHECK(site_writer_write_aggregates(&gallery_config, albums[0], os, output, scratch, &log) ==
+             0);
+  TEST_CHECK(site_writer_copy_static_files(&gallery_config, &static_paths, os, scratch, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(os_memory_is_file(os, "public/index.html", "<h1>Root</h1>"));
+  TEST_CHECK(os_memory_is_file(os, "public/map.xml", "<g>Gallery &amp; Co</g>"));
+  TEST_CHECK(os_memory_is_file(os, "public/nested/links.html", "../index.html"));
+  TEST_CHECK(os_memory_is_file(os, "public/icons/a.txt", "static"));
 }
 
 // A failed page write names the root album in words rather than quoting its empty source directory,
-// then the destination. The destination is an existing directory, so opening it for writing fails.
+// then the cause and the destination. The destination is an existing directory, so opening it for
+// writing fails.
 static void test_write_album_pages_names_root_album_in_words(void) {
-  char root_dir_template[] = "/tmp/fram-writer-root-page.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
-    return;
-  }
-  struct Album root = {.source_dir = "", .title = "Root", .output_path = root_dir};
+  struct Os* os = os_memory();
+  os_memory_mkdir(os, "public");
+  struct Album root = {.source_dir = S(""), .title = S("Root"), .output_path = S("public")};
   const struct Album* albums[] = {&root};
-  char html[] = "<h1>Root</h1>";
-  const struct RenderedPage rendered[] = {{.html = html, .html_len = sizeof(html) - 1}};
-  char err[ERROR_MESSAGE_SIZE] = "";
+  const struct RenderedPage rendered[] = {{.html = S("<h1>Root</h1>")}};
+  struct Log log = test_log();
 
-  TEST_CHECK(site_writer_write_album_pages(albums, 1, rendered, err, sizeof(err)) == -1);
-  char reason[FS_REASON_SIZE];
-  char expected[ERROR_MESSAGE_SIZE];
-  const int expected_len = snprintf(expected, sizeof(expected),
-                                    "failed to write output: %s (for the root album, to '%s')",
-                                    error_system_message(reason, sizeof(reason), EISDIR), root_dir);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-  TEST_MSG("err: %s", err);
-
-cleanup:
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(site_writer_write_album_pages(albums, 1, rendered, os, test_arena(), &log) == -1);
+  TEST_CHECK(test_log_is(&log, "failed to write output for the root album: %s ('public')\n",
+                         strerror(EISDIR)));
 }
 
 // A failed sub-album page write quotes the album's source directory, even one literally named
 // `root album`, so it never reads the same as the root's diagnostic.
 static void test_write_album_pages_quotes_sub_album_source_dir(void) {
-  char root_dir_template[] = "/tmp/fram-writer-sub-album-page.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
-    return;
-  }
-  struct Album album = {.source_dir = "root album", .title = "root album", .output_path = root_dir};
+  struct Os* os = os_memory();
+  os_memory_mkdir(os, "public");
+  struct Album album = {
+      .source_dir = S("root album"), .title = S("root album"), .output_path = S("public")};
   const struct Album* albums[] = {&album};
-  char html[] = "<h1>root album</h1>";
-  const struct RenderedPage rendered[] = {{.html = html, .html_len = sizeof(html) - 1}};
-  char err[ERROR_MESSAGE_SIZE] = "";
+  const struct RenderedPage rendered[] = {{.html = S("<h1>root album</h1>")}};
+  struct Log log = test_log();
 
-  TEST_CHECK(site_writer_write_album_pages(albums, 1, rendered, err, sizeof(err)) == -1);
-  char reason[FS_REASON_SIZE];
-  char expected[ERROR_MESSAGE_SIZE];
-  const int expected_len =
-      snprintf(expected, sizeof(expected), "failed to write output: %s (for 'root album', to '%s')",
-               error_system_message(reason, sizeof(reason), EISDIR), root_dir);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-  TEST_MSG("err: %s", err);
-
-cleanup:
-  remove_fixture_tree(root_dir);
+  TEST_CHECK(site_writer_write_album_pages(albums, 1, rendered, os, test_arena(), &log) == -1);
+  TEST_CHECK(test_log_is(&log, "failed to write output for 'root album': %s ('public')\n",
+                         strerror(EISDIR)));
 }
 
-// A failed aggregate write names the operation and the reason, then the destination. The
-// destination is an existing directory, so opening it for writing fails.
+// A failed aggregate write names the operation and the cause, then the destination. The destination
+// is an existing directory, so opening it for writing fails.
 static void test_write_aggregates_reports_write_failure(void) {
-  char root_dir_template[] = "/tmp/fram-writer-aggregate.XXXXXX";
-  const char* root_dir = init_fixture_dir(root_dir_template);
-  if (root_dir == NULL) {
-    return;
-  }
-  struct Arena paths;
-  arena_init(&paths);
-  char* output_dir = path_join(root_dir, "public", &paths);
-  char* templates_dir = path_join(root_dir, "templates", &paths);
-  char* aggregate_output = path_join(output_dir, "map.xml", &paths);
-  static const char* const aggregates[] = {"map.xml"};
-  struct GalleryConfig config;
-  gallery_config_init(&config);
-  config.output_dir = output_dir;
-  config.templates_dir = templates_dir;
-  config.aggregate_templates = aggregates;
-  config.aggregate_template_count = 1;
-  struct Album root = {.source_dir = "", .title = "Root", .path_to_root = ""};
-  char err[ERROR_MESSAGE_SIZE] = "";
-  char reason[FS_REASON_SIZE];
-  char expected[ERROR_MESSAGE_SIZE];
-  int expected_len = -1;
-  if (!TEST_CHECK(write_fixture_file(root_dir, "templates/map.xml", "<g></g>") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(write_fixture_file(root_dir, "public/map.xml/keep", "") == 0)) {
-    goto cleanup;
-  }
-  if (!TEST_CHECK(output_dir != NULL && templates_dir != NULL && aggregate_output != NULL)) {
-    goto cleanup;
-  }
+  struct Os* os = os_memory();
+  os_memory_write(os, "templates/map.xml", "<g></g>");
+  os_memory_mkdir(os, "public/map.xml");
+  static const struct Str aggregates[] = {STR_INIT("map.xml")};
+  struct GalleryConfig gallery_config;
+  gallery_config_init(&gallery_config);
+  gallery_config.output_dir = S("public");
+  gallery_config.templates_dir = S("templates");
+  gallery_config.aggregate_templates = aggregates;
+  gallery_config.aggregate_template_count = 1;
+  struct Album root = {.source_dir = S(""), .title = S("Root"), .path_to_root = S("")};
+  struct Log log = test_log();
 
-  TEST_CHECK(site_writer_write_aggregates(&config, &root, err, sizeof(err)) == -1);
-  expected_len = snprintf(expected, sizeof(expected), "failed to write template output: %s ('%s')",
-                          error_system_message(reason, sizeof(reason), EISDIR), aggregate_output);
-  if (!TEST_CHECK(expected_len > 0 && (size_t)expected_len < sizeof(expected))) {
-    goto cleanup;
-  }
-  TEST_CHECK(strcmp(err, expected) == 0);
-  TEST_MSG("err: %s", err);
+  TEST_CHECK(site_writer_write_aggregates(&gallery_config, &root, os, test_arena(), test_arena(),
+                                          &log) == -1);
+  TEST_CHECK(test_log_is(&log, "failed to write template output: %s ('public/map.xml')\n",
+                         strerror(EISDIR)));
+}
 
-cleanup:
-  gallery_config_free(&config);
-  arena_free(&paths);
-  remove_fixture_tree(root_dir);
+// A failed static copy names the operation and the cause, then the path that failed: the
+// destination when it is an existing directory, and the static file when it is gone.
+static void test_copy_static_files_reports_copy_failure(void) {
+  struct Os* os = os_memory();
+  os_memory_write(os, "static/a.css", "a {}");
+  os_memory_mkdir(os, "public/a.css");
+  struct GalleryConfig gallery_config;
+  gallery_config_init(&gallery_config);
+  gallery_config.output_dir = S("public");
+  gallery_config.static_dir = S("static");
+  struct Arena paths = test_arena();
+  struct PathList static_paths = {0};
+  path_list_push(&static_paths, S("static/a.css"), &paths);
+  struct Log log = test_log();
+
+  TEST_CHECK(
+      site_writer_copy_static_files(&gallery_config, &static_paths, os, test_arena(), &log) == -1);
+  TEST_CHECK(
+      test_log_is(&log, "failed to copy static file: %s ('public/a.css')\n", strerror(EISDIR)));
+
+  static_paths = (struct PathList){0};
+  path_list_push(&static_paths, S("static/gone.css"), &paths);
+  log = test_log();
+  TEST_CHECK(
+      site_writer_copy_static_files(&gallery_config, &static_paths, os, test_arena(), &log) == -1);
+  TEST_CHECK(
+      test_log_is(&log, "failed to copy static file: %s ('static/gone.css')\n", strerror(ENOENT)));
 }
 
 TEST_LIST = {
@@ -227,5 +149,6 @@ TEST_LIST = {
     {"write album pages quotes sub album source dir",
      test_write_album_pages_quotes_sub_album_source_dir},
     {"write aggregates reports write failure", test_write_aggregates_reports_write_failure},
+    {"copy static files reports copy failure", test_copy_static_files_reports_copy_failure},
     {NULL, NULL},
 };

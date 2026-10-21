@@ -19,7 +19,7 @@ set(actual_dir "${FRAM_SCRATCH_DIR}/public")
 set(first_dir "${FRAM_SCRATCH_DIR}/first/public")
 
 execute_process(
-  COMMAND ${FRAM_EMULATOR} "${FRAM_EXECUTABLE}" build --workers 2 ${FRAM_BUILD_ARGS}
+  COMMAND ${FRAM_EMULATOR} "${FRAM_EXECUTABLE}" build --workers 2
   WORKING_DIRECTORY "${FRAM_SCRATCH_DIR}"
   RESULT_VARIABLE build_result
   OUTPUT_VARIABLE build_stdout
@@ -34,7 +34,7 @@ endif()
 file(COPY "${actual_dir}" DESTINATION "${FRAM_SCRATCH_DIR}/first")
 
 execute_process(
-  COMMAND ${FRAM_EMULATOR} "${FRAM_EXECUTABLE}" build --workers 2 ${FRAM_BUILD_ARGS}
+  COMMAND ${FRAM_EMULATOR} "${FRAM_EXECUTABLE}" build --workers 2
   WORKING_DIRECTORY "${FRAM_SCRATCH_DIR}"
   RESULT_VARIABLE build_result
   OUTPUT_VARIABLE build_stdout

@@ -19,15 +19,20 @@ add_library(fram_vendor_stb STATIC stb/stb.c)
 target_include_directories(
   fram_vendor_stb SYSTEM PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/stb>"
 )
+# `stb.c` routes stb's allocator hooks to `image_alloc` in `src/formats/image.c`, so it includes that
+# module's header, which includes sharedstuff's `str.h`.
+target_include_directories(fram_vendor_stb PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 add_library(
-  fram_vendor_sharedstuff STATIC sharedstuff/src/arena.c sharedstuff/src/string_buffer.c
+  fram_vendor_sharedstuff STATIC sharedstuff/src/arena.c sharedstuff/src/buf.c
+                                  sharedstuff/src/log.c sharedstuff/src/str.c
 )
 target_include_directories(
   fram_vendor_sharedstuff SYSTEM
   PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/sharedstuff/include>"
 )
 target_link_libraries(fram_vendor_sharedstuff PRIVATE fram_build_project)
+target_link_libraries(fram_vendor_stb PRIVATE fram_vendor_sharedstuff)
 
 add_library(fram_vendor_tomlc17 STATIC tomlc17/tomlc17.c)
 target_include_directories(

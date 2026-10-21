@@ -1,18 +1,19 @@
 #include "build/site_writer.h"
 
-#include <stdlib.h>
+#include <stddef.h>
 
-#include "build/manifest_builder.h"
 #include "build/output_path.h"
 #include "build/page_renderer.h"
 #include "build/template.h"
-#include "core/error.h"
 #include "core/path.h"
 #include "core/path_list.h"
 #include "domain/album.h"
 #include "domain/gallery_config.h"
-#include "runtime/fs.h"
+#include "runtime/memory.h"
+#include "runtime/os.h"
 #include "shared/arena.h"
+#include "shared/buf.h"
+#include "shared/str.h"
 
 // This module's three exported writers are unit-tested in `src/build/test_site_writer.c`, and
 // CTest's golden test suite exercises them end to end by building every fixture gallery and
@@ -30,46 +31,58 @@
  *                       checked it against the output-path limits, because every call site runs the
  *                       manifest phase over the same configured list first. This function does not
  *                       re-check, so an overlong name reaching here fails as an opaque write error
- *                       from the OS rather than with a diagnostic naming the limit. Must not be
+ *                       from the OS rather than with a diagnostic naming the limit.
+ * @param os             Host the template is read from and the output written to. Must not be
  *                       `NULL`.
- * @param err            Destination buffer for a failure diagnostic.
- * @param err_len        Size of `err` in bytes.
- * @return `0` on success, or `-1` on a URL-context, render, path, or write failure.
+ * @param output         Arena that holds the rendered output until it is written.
+ * @param scratch        Arena for the render's temporaries, the URL context and the output path.
+ * @param log            Log that receives the first failure. Its arena must be none of the others.
+ *                       Must not be `NULL`.
+ * @return `0` on success, or `-1` on a render or write failure.
  */
 static int write_rendered_template(const struct GalleryConfig* gallery_config,
                                    const struct Album* root_album,
-                                   const char* template_name,
-                                   char* err,
-                                   size_t err_len) __attribute__((nonnull(1, 2, 3)));
+                                   struct Str template_name,
+                                   struct Os* os,
+                                   struct Arena output,
+                                   struct Arena scratch,
+                                   struct Log* log) __attribute__((nonnull(1, 2, 4, 7)));
 
 int site_writer_write_album_pages(const struct Album* const* albums,
-                                  size_t album_count,
+                                  ptrdiff_t album_count,
                                   const struct RenderedPage* rendered_pages,
-                                  char* err,
-                                  size_t err_len) {
-  for (size_t i = 0; i < album_count; i++) {
-    char reason[FS_REASON_SIZE];
-    if (fs_write_file(albums[i]->output_path, rendered_pages[i].html, rendered_pages[i].html_len,
-                      reason, sizeof(reason)) == 0) {
-      continue;
-    }
+                                  struct Os* os,
+                                  struct Arena scratch,
+                                  struct Log* log) {
+  for (ptrdiff_t i = 0; i < album_count; i++) {
+    memory_oom_set_job(albums[i]->output_path, NULL);
+    // The operation names the album, and the write names the output path or the directory it could
+    // not create, so a failure reads `failed to write output for '<album>': <cause> ('<path>')`.
+    // Each page's operation lives in a copy of `scratch`, which the next page reuses.
+    struct Arena page_scratch = scratch;
+    struct Buf operation = {.arena = &page_scratch};
     if (album_is_root(albums[i])) {
-      return error_report(err, err_len, "failed to write output: %s (for the root album, to '%s')",
-                          reason, albums[i]->output_path);
+      buf_printf(&operation, "failed to write output for the root album");
+    } else {
+      buf_printf(&operation, "failed to write output for '%.*s'", STR_FMT(albums[i]->source_dir));
     }
-    return error_report(err, err_len, "failed to write output: %s (for '%s', to '%s')", reason,
-                        albums[i]->source_dir, albums[i]->output_path);
+    if (os_write(os, albums[i]->output_path, (struct OsSource){.bytes = rendered_pages[i].html},
+                 buf_str(&operation), log) != 0) {
+      return -1;
+    }
   }
   return 0;
 }
 
 int site_writer_write_aggregates(const struct GalleryConfig* gallery_config,
                                  const struct Album* root_album,
-                                 char* err,
-                                 size_t err_len) {
-  for (size_t i = 0; i < gallery_config->aggregate_template_count; i++) {
+                                 struct Os* os,
+                                 struct Arena output,
+                                 struct Arena scratch,
+                                 struct Log* log) {
+  for (ptrdiff_t i = 0; i < gallery_config->aggregate_template_count; i++) {
     if (write_rendered_template(gallery_config, root_album, gallery_config->aggregate_templates[i],
-                                err, err_len) != 0) {
+                                os, output, scratch, log) != 0) {
       return -1;
     }
   }
@@ -78,80 +91,48 @@ int site_writer_write_aggregates(const struct GalleryConfig* gallery_config,
 
 int site_writer_copy_static_files(const struct GalleryConfig* gallery_config,
                                   const struct PathList* static_paths,
-                                  char* err,
-                                  size_t err_len) {
-  struct Arena scratch;
-  arena_init(&scratch);
-  int rc = 0;
-  for (size_t i = 0; rc == 0 && i < static_paths->count; i++) {
-    const char* relative = path_relative_below(static_paths->items[i], gallery_config->static_dir);
-    char* output_path =
-        manifest_builder_derive_static_output(gallery_config->output_dir, relative, &scratch);
-    if (output_path == NULL) {
-      (void)error_report(err, err_len, "out of memory building output path for static file '%s'",
-                         static_paths->items[i]);
-      rc = -1;
-      continue;
-    }
-    char reason[FS_REASON_SIZE];
-    if (fs_copy_file(static_paths->items[i], output_path, reason, sizeof(reason)) != 0) {
-      (void)error_report(err, err_len, "failed to copy static file: %s (for '%s', to '%s')", reason,
-                         static_paths->items[i], output_path);
-      rc = -1;
+                                  struct Os* os,
+                                  struct Arena scratch,
+                                  struct Log* log) {
+  for (ptrdiff_t i = 0; i < static_paths->count; i++) {
+    memory_oom_set_job(static_paths->items[i], NULL);
+    // Each copy works in its own copy of `scratch`, so one file's path is dead before the next.
+    struct Arena copy_scratch = scratch;
+    struct Str relative = {0};
+    (void)path_is_below(static_paths->items[i], gallery_config->static_dir, &relative);
+    const struct Str output_path = path_join(gallery_config->output_dir, relative, &copy_scratch);
+    // The copy names the path that failed, the static file or its destination, which mirrors it.
+    const struct OsSource source = {.kind = OS_SOURCE_FILE, .file_path = static_paths->items[i]};
+    if (os_write(os, output_path, source, S("failed to copy static file"), log) != 0) {
+      return -1;
     }
   }
-  arena_free(&scratch);
-  return rc;
+  return 0;
 }
 
 static int write_rendered_template(const struct GalleryConfig* gallery_config,
                                    const struct Album* root_album,
-                                   const char* template_name,
-                                   char* err,
-                                   size_t err_len) {
-  struct Arena scratch;
-  arena_init(&scratch);
-
-  int rc = -1;
-  char* output_path = NULL;
-  size_t rendered_html_len = 0;
-  char* rendered_html = NULL;
+                                   struct Str template_name,
+                                   struct Os* os,
+                                   struct Arena output,
+                                   struct Arena scratch,
+                                   struct Log* log) {
+  memory_oom_set_job(template_name, NULL);
   // An aggregate renders against the root album, whose own `path_to_root` is empty, so a nested
   // aggregate such as `feeds/map.xml` needs its own prefix for page-relative URLs to resolve.
   struct Album aggregate_album = *root_album;
+  aggregate_album.path_to_root = output_path_to_root(template_name, &scratch);
   const struct TemplateContext context = {
       .gallery_config = gallery_config,
       .album_current = &aggregate_album,
   };
-  aggregate_album.path_to_root = output_path_to_root(template_name, &scratch);
-  if (aggregate_album.path_to_root == NULL) {
-    (void)error_report(err, err_len, "out of memory building aggregate URL context for '%s'",
-                       template_name);
-    goto cleanup;
+  struct Str rendered_html = {0};
+  if (template_render_file(gallery_config->templates_dir, template_name, &context, os, &output,
+                           scratch, &rendered_html, log) != 0) {
+    return -1;
   }
-
-  rendered_html = template_render_file(gallery_config->templates_dir, template_name, &context,
-                                       &rendered_html_len, err, err_len);
-  if (rendered_html == NULL) {
-    goto cleanup;
-  }
-
-  output_path =
-      manifest_builder_derive_template_output(gallery_config->output_dir, template_name, &scratch);
-  if (output_path == NULL) {
-    (void)error_report(err, err_len, "out of memory building output path for '%s'", template_name);
-    goto cleanup;
-  }
-  char reason[FS_REASON_SIZE];
-  if (fs_write_file(output_path, rendered_html, rendered_html_len, reason, sizeof(reason)) != 0) {
-    (void)error_report(err, err_len, "failed to write template output: %s ('%s')", reason,
-                       output_path);
-    goto cleanup;
-  }
-  rc = 0;
-
-cleanup:
-  arena_free(&scratch);
-  free(rendered_html);
-  return rc;
+  // The render has returned, so its temporaries in `scratch` are dead and the path can reuse them.
+  const struct Str output_path = path_join(gallery_config->output_dir, template_name, &scratch);
+  return os_write(os, output_path, (struct OsSource){.bytes = rendered_html},
+                  S("failed to write template output"), log);
 }

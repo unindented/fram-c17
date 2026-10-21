@@ -2,10 +2,10 @@
 
 #include "core/fram_version.h"
 
-const char* fram_version_string(void) {
-  return "@PROJECT_VERSION@";
+struct Str fram_version_string(void) {
+  return S("@PROJECT_VERSION@");
 }
 
-const char* fram_generator_string(void) {
-  return "@PROJECT_NAME@ @PROJECT_VERSION@";
+struct Str fram_generator_string(void) {
+  return S("@PROJECT_NAME@ @PROJECT_VERSION@");
 }

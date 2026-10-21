@@ -9,12 +9,12 @@ The top-level CMake file controls the build. It sets project policy, finds the t
 | Path | Responsibility |
 | --- | --- |
 | `src/CMakeLists.txt` | Build the private application library and the `fram` executable |
-| `src/*/CMakeLists.txt` | Add sources, header file sets, and local unit tests |
-| `tests/CMakeLists.txt` | Add the golden test suite and the shared unit-test support library |
+| `src/*/CMakeLists.txt` | Add sources, header file sets, and local unit tests; `src/runtime/CMakeLists.txt` also defines the POSIX host library `fram_os_posix` |
+| `tests/CMakeLists.txt` | Add the golden test suite, the shared unit-test support library, the in-memory host, and the seeded random tests |
 | `vendor/CMakeLists.txt` | Build each vendored dependency |
 | `cmake/fram_build_profiles.cmake` | Set warnings, optimization, fortification, and sanitizers |
 | `cmake/fram_quality.cmake` | Configure formatting and static analysis |
-| `cmake/fram_testing.cmake` | Add local unit tests |
+| `cmake/fram_testing.cmake` | Register a unit test and choose the host it links |
 | `cmake/fram_packaging.cmake` | Configure installation and CPack archives |
 | `cmake/fram_run_golden.cmake` | Run one golden test |
 | `cmake/fram_restyle_graphviz_svg.cmake` | Add light and dark styles to the target graph |
@@ -23,7 +23,7 @@ The top-level CMake file controls the build. It sets project policy, finds the t
 
 ## Target graph
 
-`fram_app` is a private static library. It contains all application source files except `main.c`. The `fram` executable and unit tests link to it. `fram_app` links to `fram_vendor_sharedstuff` for the arena and string buffer implementations.
+`fram_app` is a private static library. It contains all application source files except `main.c` and `runtime/fs.c`. The `fram` executable and unit tests link to it. `runtime/fs.c`, the POSIX implementation of `runtime/os.h`, is the object library `fram_os_posix`, so each executable chooses its host when it is linked: `fram` and the tests registered with the default `OS posix` link it, and the tests registered with `fram_add_unit_test(<module> OS memory)` link `fram_os_memory` (`tests/os_memory.c`) instead. Both are object libraries because `fram_app` refers to them, and a static archive listed before its user would be skipped by a single-pass linker. `fram_app` links to `fram_vendor_sharedstuff` for the arena, counted string, output buffer, and diagnostic log implementations. The arena calls `os_oom` when an allocation does not fit, and `sharedstuff` leaves that function to the application: `main.c` defines the production one, which prints the log collected so far and `fram: out of memory` with the file the thread was working on, and exits with `EXIT_CODE_FAILURE`. `fram_test_support` defines the unit-test one.
 
 The library is static because it supports one product. It does not provide a public ABI.
 
@@ -33,13 +33,13 @@ Each vendored project has a separate target. Header-only dependencies use interf
 
 `Threads::Threads` is a private dependency of `fram_app`. CMake adds this link requirement to each executable that links to the static library.
 
-Source directories group code by function. They do not define separate libraries. Each local `CMakeLists.txt` adds files to `fram_app` and links the private vendored dependency that only its code uses. More libraries would add link boundaries without independent APIs.
+Source directories group code by function. Apart from the host implementation, they do not define separate libraries. Each local `CMakeLists.txt` adds files to `fram_app` and links the private vendored dependency that only its code uses. More libraries would add link boundaries without independent APIs.
 
 The pinned stb implementation has its own translation unit. It restricts decoding to JPEG, keeps decoder errors in thread-local storage for concurrent derivative workers, and keeps vendor warnings separate from first-party compilation.
 
 ### Generated dependency graph
 
-CMake generates this graph from the `release` preset. The graph shows CMake targets and link relationships. It does not show dependencies between source modules. Graph options remove test-only targets.
+CMake generates this graph from the `release` preset. The graph shows CMake targets and link relationships. It does not show dependencies between source modules. Graph options remove test-only targets, such as the in-memory host `fram_os_memory`.
 
 ![CMake target dependency graph](media/dependencies.svg)
 
@@ -79,7 +79,7 @@ The address-sanitizer profile instruments first-party and vendored code. Vendore
 
 ## Linting and formatting
 
-CMake sets `clang-tidy` and `cppcheck` as properties of first-party targets. Neither tool checks vendored code.
+CMake sets `clang-tidy` and `cppcheck` as properties of first-party targets. Neither tool checks vendored sources. cppcheck reads the vendored `sharedstuff` headers to expand `STR_FMT`. It also analyzes the inline functions those headers define.
 
 Tests run `cppcheck`. Tests do not run `clang-tidy` because deliberate failure cases cause analyzer errors.
 
@@ -93,15 +93,19 @@ This duplication is deliberate. A configure-time glob can omit a new file until 
 
 `FRAM_BUILD_TESTING` controls test creation. It is true by default for a top-level build. It is false by default for a child build.
 
-Each source directory adds its local unit tests. The top-level `tests/` directory adds the golden test suite and `fram_test_support`. Each CTest case has a `fram` label. It also has a `unit` or `golden` label.
+Each source directory adds its local unit tests. The top-level `tests/` directory adds the golden test suite, `fram_test_support`, the in-memory host `fram_os_memory`, and the seeded random pass `tests/test_random.c`. Each CTest case has a `fram` label. It also has a `unit` or `golden` label.
 
-`fram_test_support` holds the unit-test plumbing that several `test_*.c` files need: a fixture-root creator, a recursive fixture-tree remover, a fixture-file writer, a working-directory switch, standard-stream capture and restore, and a capture-stream reader. Its own unit test is `tests/test_test_support.c`. `test_support.c` defines `TEST_NO_MAIN`, so acutest's `main` and run state stay in each test executable's own translation unit and the link resolves `acutest_check_` and `acutest_abort_` against it. A failure raised inside the support library is reported against `test_support.c` and fails the test that reached it.
+`fram_add_unit_test` takes `OS memory` to link the in-memory host, and then compiles the test with `FRAM_TEST_OS_MEMORY` set to 1. Every unit test registered without `OS memory` links the POSIX host: the POSIX layer's own tests, the test-support test and the tests that run processes or decode video, which need the real host; the suites that build their fixtures in a real temporary directory; and the tests that reach no host. New tests use the in-memory host. `fram_add_unit_test` also takes `NAME` when one source builds more than one test. `src/runtime/test_os.c` uses both: it builds `fram.os_posix`, which works in a real temporary directory, and `fram.os_memory`. These are the contract tests of `runtime/os.h`. Both must pass. Each unit test has a CTest timeout of 60 seconds, so a test that hangs fails instead of stopping the run.
+
+`sharedstuff` has its own compile-fail tests for `buf_printf` and `log_error`. They check that a call whose arguments disagree with its format does not compile: a raw `struct Str` for `%.*s`, a missing argument, a `ptrdiff_t` for `%d`, a format that is not a literal, a non-string given to `STR_FMT`, and a disagreement through a forwarding wrapper. They run in the `sharedstuff` repository. The vendored copy holds no tests.
+
+`fram_test_support` holds the unit-test plumbing that several `test_*.c` files need: a fixture-root creator, a recursive fixture-tree remover, a fixture-file writer, a working-directory switch, standard-stream capture and restore, an arena over a fresh reservation, a log over a fresh reservation and exact-text log checks, an out-of-memory check, and, for `tests/test_random.c`, a seeded random generator. It also defines the unit-test `os_oom`, which exits with a status of its own, so `test_is_oom` can run code in a child process and tell running out of memory apart from a crash. It is an object library, so that definition is linked into every test executable whatever the link order. Its own unit test is `tests/test_test_support.c`. `test_support.c` defines `TEST_NO_MAIN`, so acutest's `main` and run state stay in each test executable's own translation unit and the link resolves acutest's declarations, such as `acutest_check_`, `acutest_message_` and `acutest_abort_`, against it. A failure raised inside the support library is reported against `test_support.c` and fails the test that reached it.
 
 A parent that enables `fram` tests must call `enable_testing()` in its top-level `CMakeLists.txt`. CTest starts discovery at the build root. A child call cannot create the root test file. CMake prints this requirement when a child enables tests.
 
 Each unit test links the same `fram_app` as the executable. No test target compiles an application source a second time with different definitions. The production render limit is 256 MiB, and a failure test at this limit uses too much memory. The template test passes a 64 KiB limit to `template_render_file_limited` instead.
 
-The `photos` golden test covers an image-only gallery with an explicit input directory. The `videos` golden test adds MP4 inputs through the default `media/` directory and is created only when both `ffmpeg` and `ffprobe` are available. This keeps the photo-only suite available on systems without FFmpeg.
+The golden test `fram.golden` builds the fixture gallery in `tests/fixtures/gallery`, which mixes JPEG and MP4 sources in the default `media/` directory. CMake creates it only when both `ffmpeg` and `ffprobe` are available during configuration.
 
 Each golden test uses a separate scratch tree. It builds the gallery twice and verifies that the second build leaves every generated file unchanged. The CMake script then compares the output inventory with `tests/expected/<name>`, compares non-media files and copied originals byte for byte after substituting the project version for the `@PROJECT_VERSION@` placeholder in expected pages, and verifies that generated derivatives are nonempty. Derivative bytes are not golden because JPEG output can vary across stb versions and SIMD paths; unit tests pin image dimensions and pixels.
 

@@ -16,6 +16,7 @@ set(fram_owned_sources
     "${PROJECT_SOURCE_DIR}/src/app/test_cli.c"
     "${PROJECT_SOURCE_DIR}/src/app/test_cli_dispatch.c"
     "${PROJECT_SOURCE_DIR}/src/app/test_cmd_build.c"
+    "${PROJECT_SOURCE_DIR}/src/app/test_cmd_build_video.c"
     "${PROJECT_SOURCE_DIR}/src/app/test_cmd_config.c"
     "${PROJECT_SOURCE_DIR}/src/build/album_scanner.c"
     "${PROJECT_SOURCE_DIR}/src/build/album_scanner.h"
@@ -34,8 +35,13 @@ set(fram_owned_sources
     "${PROJECT_SOURCE_DIR}/src/build/template.c"
     "${PROJECT_SOURCE_DIR}/src/build/template.h"
     "${PROJECT_SOURCE_DIR}/src/build/test_album_scanner.c"
+    "${PROJECT_SOURCE_DIR}/src/build/test_album_scanner.h"
+    "${PROJECT_SOURCE_DIR}/src/build/test_album_scanner_video.c"
     "${PROJECT_SOURCE_DIR}/src/build/test_derivative_renderer.c"
+    "${PROJECT_SOURCE_DIR}/src/build/test_derivative_renderer.h"
+    "${PROJECT_SOURCE_DIR}/src/build/test_derivative_renderer_video.c"
     "${PROJECT_SOURCE_DIR}/src/build/test_job.c"
+    "${PROJECT_SOURCE_DIR}/src/build/test_job_arenas.h"
     "${PROJECT_SOURCE_DIR}/src/build/test_jpeg.h"
     "${PROJECT_SOURCE_DIR}/src/build/test_manifest_builder.c"
     "${PROJECT_SOURCE_DIR}/src/build/test_output_path.c"
@@ -46,8 +52,6 @@ set(fram_owned_sources
     "${PROJECT_SOURCE_DIR}/src/core/error.c"
     "${PROJECT_SOURCE_DIR}/src/core/error.h"
     "${PROJECT_SOURCE_DIR}/src/core/fram_version.h"
-    "${PROJECT_SOURCE_DIR}/src/core/grow.c"
-    "${PROJECT_SOURCE_DIR}/src/core/grow.h"
     "${PROJECT_SOURCE_DIR}/src/core/parse.c"
     "${PROJECT_SOURCE_DIR}/src/core/parse.h"
     "${PROJECT_SOURCE_DIR}/src/core/path.c"
@@ -56,7 +60,6 @@ set(fram_owned_sources
     "${PROJECT_SOURCE_DIR}/src/core/path_list.h"
     "${PROJECT_SOURCE_DIR}/src/core/test_ascii.c"
     "${PROJECT_SOURCE_DIR}/src/core/test_error.c"
-    "${PROJECT_SOURCE_DIR}/src/core/test_grow.c"
     "${PROJECT_SOURCE_DIR}/src/core/test_parse.c"
     "${PROJECT_SOURCE_DIR}/src/core/test_path.c"
     "${PROJECT_SOURCE_DIR}/src/core/test_path_list.c"
@@ -89,16 +92,27 @@ set(fram_owned_sources
     "${PROJECT_SOURCE_DIR}/src/formats/toml.h"
     "${PROJECT_SOURCE_DIR}/src/runtime/fs.c"
     "${PROJECT_SOURCE_DIR}/src/runtime/fs.h"
+    "${PROJECT_SOURCE_DIR}/src/runtime/memory.c"
+    "${PROJECT_SOURCE_DIR}/src/runtime/memory.h"
+    "${PROJECT_SOURCE_DIR}/src/runtime/os.h"
     "${PROJECT_SOURCE_DIR}/src/runtime/pool.c"
     "${PROJECT_SOURCE_DIR}/src/runtime/pool.h"
     "${PROJECT_SOURCE_DIR}/src/runtime/proc.c"
     "${PROJECT_SOURCE_DIR}/src/runtime/proc.h"
     "${PROJECT_SOURCE_DIR}/src/runtime/test_fs.c"
+    "${PROJECT_SOURCE_DIR}/src/runtime/test_memory.c"
+    "${PROJECT_SOURCE_DIR}/src/runtime/test_os.c"
     "${PROJECT_SOURCE_DIR}/src/runtime/test_pool.c"
     "${PROJECT_SOURCE_DIR}/src/runtime/test_proc.c"
     "${PROJECT_SOURCE_DIR}/src/runtime/test_video.c"
+    "${PROJECT_SOURCE_DIR}/src/runtime/test_walk.c"
     "${PROJECT_SOURCE_DIR}/src/runtime/video.c"
     "${PROJECT_SOURCE_DIR}/src/runtime/video.h"
+    "${PROJECT_SOURCE_DIR}/src/runtime/walk.c"
+    "${PROJECT_SOURCE_DIR}/src/runtime/walk.h"
+    "${PROJECT_SOURCE_DIR}/tests/os_memory.c"
+    "${PROJECT_SOURCE_DIR}/tests/os_memory.h"
+    "${PROJECT_SOURCE_DIR}/tests/test_random.c"
     "${PROJECT_SOURCE_DIR}/tests/test_support.c"
     "${PROJECT_SOURCE_DIR}/tests/test_support.h"
     "${PROJECT_SOURCE_DIR}/tests/test_test_support.c"
@@ -125,9 +139,11 @@ if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
   set(fram_clang_tidy_command "")
 endif()
 
-# Production and test targets run cppcheck with the same arguments.
+# Production and test targets run cppcheck with the same arguments. CMake hands cppcheck only the
+# `-I` include directories, not the `-isystem` ones, so the vendored sharedstuff headers are named
+# explicitly: without them cppcheck cannot expand `STR_FMT` and miscounts `printf` arguments.
 set(fram_cppcheck_property
-    "${fram_cppcheck_command};--enable=warning,performance,portability;--std=${fram_cppcheck_standard};--error-exitcode=1;--quiet"
+    "${fram_cppcheck_command};--enable=warning,performance,portability;--std=${fram_cppcheck_standard};--error-exitcode=1;--quiet;-I${PROJECT_SOURCE_DIR}/vendor/sharedstuff/include"
 )
 
 function(fram_enable_project_analysis target)

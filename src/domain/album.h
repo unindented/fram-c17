@@ -4,44 +4,44 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "shared/arena.h"
+#include "shared/str.h"
 
 struct MediaItem;
 
-/** One generated gallery page and its immediate contents. */
+/**
+ * One generated gallery page and its immediate contents. The album, its strings, its media records
+ * and its pointer arrays all live in the arena the skeleton was built in.
+ */
 struct Album {
-  /** Owns all strings, media records, and pointer arrays belonging to this album. */
-  struct Arena arena;
-
   /** Source directory relative to `input_dir`, or an empty string for the root. */
-  const char* source_dir;
+  struct Str source_dir;
 
   /** URL-safe generated directory relative to `output_dir`, or empty for the root. */
-  const char* slug_path;
+  struct Str slug_path;
 
   /** Directory basename, or the gallery title for the root. */
-  const char* title;
+  struct Str title;
 
-  /** Percent-encoded output-root-relative page URL. */
-  const char* url_path;
+  /** Output-root-relative page URL, already URL-safe because it is built from slugs. */
+  struct Str url_path;
 
   /** Filesystem output path. */
-  const char* output_path;
+  struct Str output_path;
 
   /** Relative prefix from this page to the output root. */
-  const char* path_to_root;
+  struct Str path_to_root;
 
   /** Media directly in this album, sorted by filename. */
   struct MediaItem** media;
 
   /** Number of items in `media`, excluding media held by descendant albums. */
-  size_t media_count;
+  ptrdiff_t media_count;
 
   /** Immediate child albums. */
   struct Album** sub_albums;
 
   /** Number of entries in `sub_albums`, counting immediate children only. */
-  size_t sub_album_count;
+  ptrdiff_t sub_album_count;
 
   /** Parent album, or `NULL` for the root. */
   const struct Album* parent;
@@ -50,33 +50,17 @@ struct Album {
   const struct MediaItem* cover;
 
   /** Total media count including descendants. */
-  size_t item_count_total;
+  ptrdiff_t item_count_total;
 
   /** Number of directory edges below the root album. */
-  size_t depth;
+  ptrdiff_t depth;
+
+  /**
+   * Whether the album's page path exceeds an output limit. Its media outputs and its sub-albums
+   * extend that path, so the scan reports the album alone and checks none of them.
+   */
+  bool is_path_rejected;
 };
-
-/**
- * @brief Initializes an empty album.
- *
- * Prepares the album's arena and resets every field to empty so the album scanner can fill it.
- *
- * @param album Album handle to prepare. Must not be `NULL`, and must not already own arena
- *              allocations. This overwrites the arena handle without releasing it, so a populated
- *              album passed here leaks every chunk it held. Reset a populated album with
- *              `album_free`, which leaves it initialized.
- */
-void album_init(struct Album* album) __attribute__((nonnull(1)));
-
-/**
- * @brief Releases arena-owned album data and resets the album for reuse.
- *
- * Invalidates every arena-owned pointer on the album. The album stays initialized, so it may be
- * reused without calling `album_init`.
- *
- * @param album Album to release. Must not be `NULL`.
- */
-void album_free(struct Album* album) __attribute__((nonnull(1)));
 
 /**
  * @brief Reports whether an album is the gallery's root album.
