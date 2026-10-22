@@ -81,6 +81,7 @@ static const struct Str config_keys[] = {
     STR_INIT("album_template"),
     STR_INIT("aggregate_templates"),
     STR_INIT("derivatives"),
+    STR_INIT("sort"),
     STR_INIT("video_frame_seconds"),
     // clang-format on
 };
@@ -88,6 +89,9 @@ static const struct Str config_keys[] = {
 /** Every key a `derivatives.<name>` table may hold, each read by `copy_derivatives_entry`. */
 static const struct Str derivative_keys[] = {STR_INIT("width"), STR_INIT("height"),
                                              STR_INIT("quality"), STR_INIT("crop")};
+
+/** Every key the `sort` table may hold, each read by `copy_sort`. */
+static const struct Str sort_keys[] = {STR_INIT("albums"), STR_INIT("media")};
 
 static const struct GalleryDerivative DERIVATIVES_DEFAULT[] = {
     {.name = STR_INIT("s"), .width_px = 120, .height_px = 120, .quality = 70, .is_crop = true},
@@ -141,7 +145,7 @@ static int gallery_config_load_toml(struct Str config_path,
  * template-name array, the derivative tables, and `video_frame_seconds`. It copies every value into
  * `perm` rather than borrowing from `table`. `gallery_config_load` calls `toml_free` as soon as
  * this returns, which releases the pool every `toml_datum_t` string points into, while the config
- * outlives the parse.
+ * outlives the parse. The `sort` table is applied just before `video_frame_seconds`.
  *
  * @param gallery_config Config that receives the values. Must not be `NULL`.
  * @param table          Parsed TOML top-level table.
@@ -258,6 +262,38 @@ static int copy_size(toml_datum_t table,
                      struct Str key_prefix,
                      const struct GalleryConfigIntKey* spec,
                      struct Log* log) __attribute__((nonnull(3, 4)));
+
+/**
+ * @brief Copies and validates the optional `sort` table.
+ *
+ * When the key is absent, this leaves both orders untouched and keeps the defaults from
+ * `gallery_config_init`. An empty table also keeps them. It checks both keys even after one fails,
+ * and a rejected key keeps its default.
+ *
+ * @param gallery_config Config that receives the orders. Must not be `NULL`.
+ * @param table          Parsed TOML top-level table.
+ * @param log            Log that receives every error. Must not be `NULL`.
+ * @return `0` on success or when the key is absent, or `-1` on a wrong type, an unknown key, or an
+ *         invalid order.
+ */
+static int copy_sort(struct GalleryConfig* gallery_config, toml_datum_t table, struct Log* log)
+    __attribute__((nonnull(1, 3)));
+
+/**
+ * @brief Copies one optional `sort.<key>` order, which must be exactly `asc` or `desc`.
+ *
+ * @param sort_table Parsed `sort` table.
+ * @param key        Key to read. Must not be `NULL`.
+ * @param order_out  Receives the order when the key is present and valid, and keeps its value
+ *                   otherwise. Must not be `NULL`.
+ * @param log        Log that receives the error. Must not be `NULL`.
+ * @return `0` on success or when the key is absent, or `-1` on a wrong type, a `NUL` byte, or a
+ *         value other than `asc` or `desc`.
+ */
+static int copy_sort_order(toml_datum_t sort_table,
+                           const char* key,
+                           enum GallerySortOrder* order_out,
+                           struct Log* log) __attribute__((nonnull(2, 3, 4)));
 
 /**
  * @brief Validates a present `base_url` as an absolute HTTP(S) URL and trims any trailing `/`.
@@ -379,6 +415,18 @@ static void gallery_config_print_string_array(struct Buf* buffer,
     __attribute__((nonnull(1, 2, 3)));
 
 /**
+ * @brief Writes the `sort = { ... }` line, naming both orders even at their defaults.
+ *
+ * The table is inline, so a key printed after it still belongs to the top-level table.
+ *
+ * @param buffer         Buffer the line is appended to. Must not be `NULL`.
+ * @param gallery_config Config whose orders are written. Must not be `NULL`.
+ */
+static void gallery_config_print_sort(struct Buf* buffer,
+                                      const struct GalleryConfig* gallery_config)
+    __attribute__((nonnull(1, 2)));
+
+/**
  * @brief Writes `text` as a quoted TOML basic string, escaping delimiters and control bytes.
  *
  * TOML basic strings forbid raw control bytes, so this escapes them alongside `"` and `\`.
@@ -456,6 +504,7 @@ int gallery_config_print(const struct GalleryConfig* gallery_config,
     buf_append(&text, S(" }"));
   }
   buf_append(&text, S(" }\n"));
+  gallery_config_print_sort(&text, gallery_config);
   buf_printf(&text, "video_frame_seconds = %td\n", gallery_config->video_frame_seconds);
   return os_print(os, 1, buf_str(&text));
 }
@@ -530,6 +579,7 @@ static void gallery_config_load_fields(struct GalleryConfig* gallery_config,
                             &gallery_config->aggregate_templates,
                             &gallery_config->aggregate_template_count, log);
   (void)copy_derivatives(gallery_config, table, perm, log);
+  (void)copy_sort(gallery_config, table, log);
 
   const struct GalleryConfigIntKey video_frame_seconds = {
       .key = "video_frame_seconds",
@@ -761,6 +811,56 @@ static int copy_size(toml_datum_t table,
   return 0;
 }
 
+static int copy_sort(struct GalleryConfig* gallery_config, toml_datum_t table, struct Log* log) {
+  const toml_datum_t value = toml_get(table, "sort");
+  if (value.type == TOML_UNKNOWN) {
+    return 0;
+  }
+  if (value.type != TOML_TABLE) {
+    return log_error(log, "config key 'sort' must be a table");
+  }
+  int rc = 0;
+  if (toml_require_known_keys(value, sort_keys, sizeof(sort_keys) / sizeof(sort_keys[0]),
+                              S("config"), S("sort."), (struct Str){0}, log) != 0) {
+    rc = -1;
+  }
+  if (copy_sort_order(value, "albums", &gallery_config->album_sort_order, log) != 0) {
+    rc = -1;
+  }
+  if (copy_sort_order(value, "media", &gallery_config->media_sort_order, log) != 0) {
+    rc = -1;
+  }
+  return rc;
+}
+
+static int copy_sort_order(toml_datum_t sort_table,
+                           const char* key,
+                           enum GallerySortOrder* order_out,
+                           struct Log* log) {
+  const toml_datum_t value = toml_get(sort_table, key);
+  if (value.type == TOML_UNKNOWN) {
+    return 0;
+  }
+  if (value.type != TOML_STRING) {
+    return log_error(log, "config key 'sort.%s' must be a string", key);
+  }
+  // A `NUL` decoded from an escape would cut the quoted value below, so the message names none.
+  if (!toml_datum_is_text(value)) {
+    return log_error(log, "config key 'sort.%s' must not contain a NUL byte", key);
+  }
+  const struct Str order = toml_datum_str(value);
+  if (str_eq(order, S("asc"))) {
+    *order_out = GALLERY_SORT_ASC;
+    return 0;
+  }
+  if (str_eq(order, S("desc"))) {
+    *order_out = GALLERY_SORT_DESC;
+    return 0;
+  }
+  return log_error(log, "config key 'sort.%s' must be 'asc' or 'desc': '%.*s'", key,
+                   STR_FMT(order));
+}
+
 static int normalize_base_url(struct GalleryConfig* gallery_config, struct Log* log) {
   if (gallery_config->base_url.len == 0) {
     return 0;
@@ -886,6 +986,13 @@ static void gallery_config_print_string_array(struct Buf* buffer,
     print_string(buffer, items[i]);
   }
   buf_append(buffer, S("]\n"));
+}
+
+static void gallery_config_print_sort(struct Buf* buffer,
+                                      const struct GalleryConfig* gallery_config) {
+  buf_printf(buffer, "sort = { albums = \"%s\", media = \"%s\" }\n",
+             gallery_config->album_sort_order == GALLERY_SORT_DESC ? "desc" : "asc",
+             gallery_config->media_sort_order == GALLERY_SORT_DESC ? "desc" : "asc");
 }
 
 static void print_string(struct Buf* buffer, struct Str text) {

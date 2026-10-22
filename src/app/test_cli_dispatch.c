@@ -169,6 +169,7 @@ static void test_config_command_is_dispatched(void) {
                     "derivatives = { s = { width = 120, height = 120, quality = 70, crop = true }, "
                     "m = { width = 520, height = 360, quality = 80, crop = true }, "
                     "l = { width = 792, height = 594, quality = 85 } }\n"
+                    "sort = { albums = \"asc\", media = \"asc\" }\n"
                     "video_frame_seconds = 1\n") == 0);
   TEST_CHECK(dispatch_out.stderr_out[0] == '\0');
   // No page was written, which is what separates `config` from `build`.

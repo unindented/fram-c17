@@ -111,6 +111,10 @@ aggregate_templates = []
 # height define a bounding box. `crop` defaults to false. A smaller source is not enlarged.
 derivatives = { s = { width = 120, height = 120, quality = 70, crop = true }, m = { width = 520, height = 360, quality = 80, crop = true }, l = { width = 792, height = 594, quality = 85 } }
 
+# Order of each album's immediate child albums and of its direct media, by source filename: "asc" or
+# "desc".
+sort = { albums = "asc", media = "asc" }
+
 # Preferred video poster-frame position in seconds. A shorter video uses its midpoint.
 video_frame_seconds = 1
 ```
@@ -123,7 +127,7 @@ An aggregate template name has two uses. It is the source path below `templates_
 
 ### Media
 
-Each directory below `input_dir` that contains matching media or an album descendant becomes a nested album page. The root input directory becomes `output_dir/index.html`. Albums and media sort by source filename. Generated album directory segments and media filenames are lowercase URL-safe slugs; source files and directories are never renamed. Album and media titles display underscores as spaces, and the HTML `download` name uses that humanized media title.
+Each directory below `input_dir` that contains matching media or an album descendant becomes a nested album page. The root input directory becomes `output_dir/index.html`. Albums and media sort by source filename, in the order `sort.albums` and `sort.media` set, each ascending by default. Dated album directories can then list newest first while the files in each album keep their shooting order. An album's cover is the first media item it lists, or, when it has no media of its own, the cover of the first child album it lists. Generated album directory segments and media filenames are lowercase URL-safe slugs; source files and directories are never renamed. Album and media titles display underscores as spaces, and the HTML `download` name uses that humanized media title.
 
 Each JPEG produces every configured derivative and a copied original. The tool applies EXIF orientation before sizing the derivatives, then applies each derivative's crop policy independently. Each MP4 produces the same derivative set from an auto-rotated poster frame, while its copied original remains the video played by the gallery.
 

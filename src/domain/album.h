@@ -31,13 +31,13 @@ struct Album {
   /** Relative prefix from this page to the output root. */
   struct Str path_to_root;
 
-  /** Media directly in this album, sorted by filename. */
+  /** Media directly in this album, in display order. */
   struct MediaItem** media;
 
   /** Number of items in `media`, excluding media held by descendant albums. */
   ptrdiff_t media_count;
 
-  /** Immediate child albums. */
+  /** Immediate child albums, in display order. */
   struct Album** sub_albums;
 
   /** Number of entries in `sub_albums`, counting immediate children only. */
@@ -46,7 +46,10 @@ struct Album {
   /** Parent album, or `NULL` for the root. */
   const struct Album* parent;
 
-  /** First direct media item, otherwise the first item below this album. */
+  /**
+   * First direct media item in display order, otherwise the cover of the first child album in
+   * display order.
+   */
   const struct MediaItem* cover;
 
   /** Total media count including descendants. */

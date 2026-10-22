@@ -50,6 +50,15 @@ struct GalleryDerivative {
   bool is_crop;
 };
 
+/** Direction in which an album lists its child albums or its media. */
+enum GallerySortOrder {
+  /** Ascending source filename, the default. */
+  GALLERY_SORT_ASC,
+
+  /** Descending source filename. */
+  GALLERY_SORT_DESC,
+};
+
 /**
  * Gallery configuration loaded from `fram.toml`. Every string and array it points at is either a
  * default literal or a copy in the arena `gallery_config_load` was given.
@@ -95,6 +104,12 @@ struct GalleryConfig {
   /** Number of recipes in `derivatives`, from one to `GALLERY_DERIVATIVE_COUNT_MAX`. */
   ptrdiff_t derivative_count;
 
+  /** Order of each album's `sub_albums`. Defaults to `GALLERY_SORT_ASC`. */
+  enum GallerySortOrder album_sort_order;
+
+  /** Order of each album's direct `media`. Defaults to `GALLERY_SORT_ASC`. */
+  enum GallerySortOrder media_sort_order;
+
   /** Preferred video-frame timestamp in seconds. Defaults to `1`. */
   ptrdiff_t video_frame_seconds;
 
@@ -127,7 +142,7 @@ void gallery_config_init(struct GalleryConfig* gallery_config) __attribute__((no
  * @brief Loads `fram.toml` configuration into `gallery_config`.
  *
  * Reads and parses the file, rejects a key outside the schema, validates required keys, template
- * names, and derivative recipes, and copies values into `perm` over the defaults from
+ * names, derivative recipes, and sort orders, and copies values into `perm` over the defaults from
  * `gallery_config_init`.
  *
  * @param gallery_config Initialized config that receives the loaded values. Must not be `NULL`.

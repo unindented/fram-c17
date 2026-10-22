@@ -109,6 +109,52 @@ static struct Str long_source_path(char fill, ptrdiff_t stem_len, struct Arena* 
   return buf_str(&path);
 }
 
+/**
+ * @brief Builds the skeleton of the sort fixture under the given album and media orders.
+ *
+ * The fixture's root holds the images `a`, `b` and `c` and the albums `x`, `y` and `z`. `x` holds
+ * two images and the albums `x/p` and `x/q`, which hold one each. `y` holds one image. `z` holds no
+ * image of its own and the albums `z/m` and `z/n`, which hold one each. So some array of each kind
+ * has zero, one, and several entries. In source order the albums are `""`, `x`, `x/p`, `x/q`, `y`,
+ * `z`, `z/m`, `z/n`, and the media are `a`, `b`, `c`, `x/1`, `x/2`, `x/p/9`, `x/q/8`, `y/only`,
+ * `z/m/one`, `z/n/two`.
+ *
+ * @param album_sort_order Order of each album's `sub_albums`.
+ * @param media_sort_order Order of each album's `media`.
+ * @param perm             Arena that owns the skeleton. Must not be `NULL`.
+ * @param albums_out       Receives the album array, sorted by `source_dir`. Must not be `NULL`.
+ * @param media_out        Receives the flat media array. Must not be `NULL`.
+ * @return `0` when the skeleton was built with the fixture's 8 albums and 10 media items, or `-1`
+ *         after recording a test failure.
+ */
+static int build_sort_fixture(enum GallerySortOrder album_sort_order,
+                              enum GallerySortOrder media_sort_order,
+                              struct Arena* perm,
+                              struct Album*** albums_out,
+                              struct MediaItem*** media_out) {
+  struct GalleryConfig config;
+  test_album_scanner_init_config(&config);
+  config.album_sort_order = album_sort_order;
+  config.media_sort_order = media_sort_order;
+  struct Str items[] = {
+      S("/photos/a.jpg"),       S("/photos/b.jpg"),      S("/photos/c.jpg"),
+      S("/photos/x/1.jpg"),     S("/photos/x/2.jpg"),    S("/photos/x/p/9.jpg"),
+      S("/photos/x/q/8.jpg"),   S("/photos/y/only.jpg"), S("/photos/z/m/one.jpg"),
+      S("/photos/z/n/two.jpg"),
+  };
+  const ptrdiff_t item_count = (ptrdiff_t)(sizeof(items) / sizeof(items[0]));
+  const struct PathList paths = {.items = items, .count = item_count, .capacity = item_count};
+  ptrdiff_t album_count = 0;
+  ptrdiff_t media_count = 0;
+  struct Log log = test_log();
+  if (!TEST_CHECK(album_scanner_build_skeleton(&config, &paths, perm, test_arena(), albums_out,
+                                               &album_count, media_out, &media_count, &log) == 0)) {
+    return -1;
+  }
+  TEST_CHECK(test_log_is_empty(&log));
+  return TEST_CHECK(album_count == 8 && media_count == 10) ? 0 : -1;
+}
+
 // An empty source tree still produces the root page and no media.
 static void test_build_skeleton_synthesizes_empty_root(void) {
   struct GalleryConfig config;
@@ -310,6 +356,98 @@ static void test_build_skeleton_slugs_internal_namespace_source(void) {
   TEST_CHECK(str_eq(media[0]->derivatives[0].url,
                     S("_fram/v1-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
                       "fram/x-jpg-s.jpg")));
+}
+
+// `media = "desc"` reverses each album's direct media at every level, and leaves every album's
+// sub-albums ascending. An album with one item or none is unchanged. Each cover is the first item
+// in display order: the last file by name, and for `z`, which has no media of its own, the cover of
+// its first sub-album.
+static void test_build_skeleton_reverses_media_when_descending(void) {
+  struct Arena perm = test_arena();
+  struct Album** albums = NULL;
+  struct MediaItem** media = NULL;
+  TEST_ASSERT(build_sort_fixture(GALLERY_SORT_ASC, GALLERY_SORT_DESC, &perm, &albums, &media) == 0);
+
+  TEST_CHECK(albums[0]->media[0] == media[2]);
+  TEST_CHECK(albums[0]->media[1] == media[1]);
+  TEST_CHECK(albums[0]->media[2] == media[0]);
+  TEST_CHECK(albums[1]->media[0] == media[4]);
+  TEST_CHECK(albums[1]->media[1] == media[3]);
+  TEST_CHECK(albums[4]->media_count == 1);
+  TEST_CHECK(albums[4]->media[0] == media[7]);
+  TEST_CHECK(albums[5]->media_count == 0);
+
+  TEST_CHECK(albums[0]->sub_albums[0] == albums[1]);
+  TEST_CHECK(albums[0]->sub_albums[1] == albums[4]);
+  TEST_CHECK(albums[0]->sub_albums[2] == albums[5]);
+  TEST_CHECK(albums[1]->sub_albums[0] == albums[2]);
+  TEST_CHECK(albums[1]->sub_albums[1] == albums[3]);
+  TEST_CHECK(albums[5]->sub_albums[0] == albums[6]);
+  TEST_CHECK(albums[5]->sub_albums[1] == albums[7]);
+
+  TEST_CHECK(albums[0]->cover == media[2]);
+  TEST_CHECK(albums[1]->cover == media[4]);
+  TEST_CHECK(albums[5]->cover == media[8]);
+}
+
+// `albums = "desc"` reverses each album's sub-albums at every level, and leaves every album's media
+// ascending. An album with one sub-album or none is unchanged. `z` has no media of its own, so its
+// cover comes from its first sub-album in display order, which is its last by name.
+static void test_build_skeleton_reverses_sub_albums_when_descending(void) {
+  struct Arena perm = test_arena();
+  struct Album** albums = NULL;
+  struct MediaItem** media = NULL;
+  TEST_ASSERT(build_sort_fixture(GALLERY_SORT_DESC, GALLERY_SORT_ASC, &perm, &albums, &media) == 0);
+
+  TEST_CHECK(albums[0]->sub_albums[0] == albums[5]);
+  TEST_CHECK(albums[0]->sub_albums[1] == albums[4]);
+  TEST_CHECK(albums[0]->sub_albums[2] == albums[1]);
+  TEST_CHECK(albums[1]->sub_albums[0] == albums[3]);
+  TEST_CHECK(albums[1]->sub_albums[1] == albums[2]);
+  TEST_CHECK(albums[5]->sub_albums[0] == albums[7]);
+  TEST_CHECK(albums[5]->sub_albums[1] == albums[6]);
+  TEST_CHECK(albums[4]->sub_album_count == 0);
+
+  TEST_CHECK(albums[0]->media[0] == media[0]);
+  TEST_CHECK(albums[0]->media[1] == media[1]);
+  TEST_CHECK(albums[0]->media[2] == media[2]);
+  TEST_CHECK(albums[1]->media[0] == media[3]);
+  TEST_CHECK(albums[1]->media[1] == media[4]);
+
+  TEST_CHECK(albums[0]->cover == media[0]);
+  TEST_CHECK(albums[5]->cover == media[9]);
+}
+
+// Under every combination of orders, the flat media array and the album array stay in source order.
+// `find_album` binary-searches the albums, the cover pass relies on each album preceding its
+// descendants, and the probe and derivative phases index the media.
+static void test_build_skeleton_keeps_flat_arrays_in_source_order(void) {
+  static const char* const album_dirs[] = {"", "x", "x/p", "x/q", "y", "z", "z/m", "z/n"};
+  static const char* const media_paths[] = {
+      "/photos/a.jpg",       "/photos/b.jpg",       "/photos/c.jpg",     "/photos/x/1.jpg",
+      "/photos/x/2.jpg",     "/photos/x/p/9.jpg",   "/photos/x/q/8.jpg", "/photos/y/only.jpg",
+      "/photos/z/m/one.jpg", "/photos/z/n/two.jpg",
+  };
+  static const enum GallerySortOrder orders[] = {GALLERY_SORT_ASC, GALLERY_SORT_DESC};
+
+  for (ptrdiff_t a = 0; a < 2; a++) {
+    for (ptrdiff_t m = 0; m < 2; m++) {
+      struct Arena perm = test_arena();
+      struct Album** albums = NULL;
+      struct MediaItem** media = NULL;
+      if (build_sort_fixture(orders[a], orders[m], &perm, &albums, &media) != 0) {
+        continue;
+      }
+      for (ptrdiff_t i = 0; i < 8; i++) {
+        TEST_CHECK(str_eq(albums[i]->source_dir, str_from_cstr(album_dirs[i])));
+        TEST_MSG("albums %td, media %td, album %td", a, m, i);
+      }
+      for (ptrdiff_t i = 0; i < 10; i++) {
+        TEST_CHECK(str_eq(media[i]->source_path, str_from_cstr(media_paths[i])));
+        TEST_MSG("albums %td, media %td, media item %td", a, m, i);
+      }
+    }
+  }
 }
 
 // Derivative suffixes are included when validating the portable per-component output limit. Each
@@ -583,6 +721,12 @@ TEST_LIST = {
     {"build skeleton humanizes album title", test_build_skeleton_humanizes_album_title},
     {"build skeleton slugs internal namespace source",
      test_build_skeleton_slugs_internal_namespace_source},
+    {"build skeleton reverses media when descending",
+     test_build_skeleton_reverses_media_when_descending},
+    {"build skeleton reverses sub albums when descending",
+     test_build_skeleton_reverses_sub_albums_when_descending},
+    {"build skeleton keeps flat arrays in source order",
+     test_build_skeleton_keeps_flat_arrays_in_source_order},
     {"build skeleton rejects overlong derivative name",
      test_build_skeleton_rejects_overlong_derivative_name},
     {"build skeleton reports every path limit failure",

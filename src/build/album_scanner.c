@@ -211,14 +211,36 @@ static int add_media(struct SkeletonState* state,
  * @brief Links albums to their children, attaches media, and computes covers and totals.
  *
  * Runs once every album and media item exists. It counts each album's children, allocates the
- * per-album child and media arrays in `state->perm`, fills them in source order, then accumulates
- * `item_count_total` and `cover` from the deepest album upwards. `state->albums[0]` must be the
- * root, and `state->media_albums[i]` must name the album owning `state->media[i]`.
+ * per-album child and media arrays in `state->perm`, fills them in source order, reverses each
+ * array whose configured order is descending, then accumulates `item_count_total` and `cover` from
+ * the deepest album upwards. It leaves `state->albums` and `state->media` in source order.
+ * `state->albums[0]` must be the root, and `state->media_albums[i]` must name the album owning
+ * `state->media[i]`.
  *
- * @param state Skeleton state holding every album and the media-to-album mapping. Must not be
- *              `NULL`.
+ * @param state          Skeleton state holding every album and the media-to-album mapping. Must not
+ *                       be `NULL`.
+ * @param gallery_config Gallery configuration supplying the album and media orders. Must not be
+ *                       `NULL`.
  */
-static void finish_relationships(struct SkeletonState* state) __attribute__((nonnull(1)));
+static void finish_relationships(struct SkeletonState* state,
+                                 const struct GalleryConfig* gallery_config)
+    __attribute__((nonnull(1, 2)));
+
+/**
+ * @brief Reverses an array of media pointers in place.
+ *
+ * @param media       Array of `media_count` pointers. May be `NULL` only when `media_count` is 0.
+ * @param media_count Number of pointers in `media`.
+ */
+static void reverse_media(struct MediaItem** media, ptrdiff_t media_count);
+
+/**
+ * @brief Reverses an array of album pointers in place.
+ *
+ * @param albums      Array of `album_count` pointers. May be `NULL` only when `album_count` is 0.
+ * @param album_count Number of pointers in `albums`.
+ */
+static void reverse_albums(struct Album** albums, ptrdiff_t album_count);
 
 /**
  * @brief Builds the `<slug>-<name>.jpg` filename for one derivative.
@@ -417,7 +439,7 @@ int album_scanner_build_skeleton(const struct GalleryConfig* gallery_config,
     return -1;
   }
 
-  finish_relationships(&state);
+  finish_relationships(&state, gallery_config);
   *perm = state.perm;
   *albums_out = state.albums;
   *album_count_out = state.album_count;
@@ -610,7 +632,8 @@ static int add_media(struct SkeletonState* state,
   return rc;
 }
 
-static void finish_relationships(struct SkeletonState* state) {
+static void finish_relationships(struct SkeletonState* state,
+                                 const struct GalleryConfig* gallery_config) {
   // Both passes over parents re-find the parent rather than following `child->parent`, which points
   // at the same album. The lookup is what yields a mutable pointer: `Album::parent` is a
   // `const struct Album*`, because a child does not own its parent, and these passes have to write
@@ -640,6 +663,20 @@ static void finish_relationships(struct SkeletonState* state) {
     struct Album* parent = find_album(state->albums, state->album_count, child->parent->source_dir);
     parent->sub_albums[parent->sub_album_count++] = child;
   }
+  // Both fill loops above list sources in strictly increasing byte order, so a descending order is
+  // their reversal: no two entries tie, and no second sort is needed. Only the per-album arrays are
+  // reversed. `find_album` searches `albums`, and the probe and derivative phases index `media`, in
+  // source order. This runs before the cover pass, so each cover is the first item in display
+  // order.
+  for (ptrdiff_t i = 0; i < state->album_count; i++) {
+    struct Album* album = state->albums[i];
+    if (gallery_config->media_sort_order == GALLERY_SORT_DESC) {
+      reverse_media(album->media, album->media_count);
+    }
+    if (gallery_config->album_sort_order == GALLERY_SORT_DESC) {
+      reverse_albums(album->sub_albums, album->sub_album_count);
+    }
+  }
   // This pass runs from the last album to the first because a parent's total and cover need its
   // children's already computed. Sorting by `source_dir` puts every album ahead of its own
   // descendants, so walking backwards visits every child before its parent.
@@ -653,6 +690,22 @@ static void finish_relationships(struct SkeletonState* state) {
         album->cover = album->sub_albums[child]->cover;
       }
     }
+  }
+}
+
+static void reverse_media(struct MediaItem** media, ptrdiff_t media_count) {
+  for (ptrdiff_t i = 0, j = media_count - 1; i < j; i++, j--) {
+    struct MediaItem* item = media[i];
+    media[i] = media[j];
+    media[j] = item;
+  }
+}
+
+static void reverse_albums(struct Album** albums, ptrdiff_t album_count) {
+  for (ptrdiff_t i = 0, j = album_count - 1; i < j; i++, j--) {
+    struct Album* album = albums[i];
+    albums[i] = albums[j];
+    albums[j] = album;
   }
 }
 

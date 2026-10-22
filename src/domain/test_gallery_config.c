@@ -185,6 +185,8 @@ static void test_load_applies_required_and_defaults(void) {
   TEST_CHECK(config.derivatives[2].height_px == 594);
   TEST_CHECK(config.derivatives[2].quality == 85);
   TEST_CHECK(!config.derivatives[2].is_crop);
+  TEST_CHECK(config.album_sort_order == GALLERY_SORT_ASC);
+  TEST_CHECK(config.media_sort_order == GALLERY_SORT_ASC);
   TEST_CHECK(config.video_frame_seconds == 1);
 
 cleanup:
@@ -205,6 +207,7 @@ static void test_load_overrides_optional_keys(void) {
       "aggregate_templates = [\"sitemap.xml\", \"about/index.html\"]\n"
       "derivatives = { tiny = { width = 200, height = 150, quality = 61, crop = true }, "
       "display = { width = 1200, height = 900, quality = 93 } }\n"
+      "sort = { albums = \"desc\", media = \"desc\" }\n"
       "video_frame_seconds = 17\n";
   struct TempConfig temp_config;
   if (write_temp_config(&temp_config, toml) != 0) {
@@ -240,6 +243,8 @@ static void test_load_overrides_optional_keys(void) {
   TEST_CHECK(config.derivatives[1].height_px == 900);
   TEST_CHECK(config.derivatives[1].quality == 93);
   TEST_CHECK(!config.derivatives[1].is_crop);
+  TEST_CHECK(config.album_sort_order == GALLERY_SORT_DESC);
+  TEST_CHECK(config.media_sort_order == GALLERY_SORT_DESC);
   TEST_CHECK(config.video_frame_seconds == 17);
 
 cleanup:
@@ -332,6 +337,60 @@ static void test_load_leaves_directory_overlap_to_the_build(void) {
   TEST_CHECK(log.errors == 0);
   TEST_CHECK(str_eq(config.input_dir, S("photos")));
   TEST_CHECK(str_eq(config.output_dir, S("photos/generated")));
+
+  remove_fixture_tree(temp_config.root_dir);
+}
+
+// Each `sort` key is read on its own. Each case sets the two keys to different orders, so a load
+// that filled one field from the other key would fail one of them.
+static void test_load_reads_sort_orders_independently(void) {
+  static const struct {
+    const char* toml_extra;
+    enum GallerySortOrder album_sort_order;
+    enum GallerySortOrder media_sort_order;
+  } cases[] = {
+      {"[sort]\nalbums = \"desc\"\nmedia = \"asc\"\n", GALLERY_SORT_DESC, GALLERY_SORT_ASC},
+      {"[sort]\nalbums = \"asc\"\nmedia = \"desc\"\n", GALLERY_SORT_ASC, GALLERY_SORT_DESC},
+      {"[sort]\nmedia = \"desc\"\n", GALLERY_SORT_ASC, GALLERY_SORT_DESC},
+  };
+
+  for (ptrdiff_t i = 0; i < (ptrdiff_t)(sizeof(cases) / sizeof(cases[0])); i++) {
+    char toml[256];
+    TEST_ASSERT(
+        snprintf(toml, sizeof(toml), "title = \"T\"\nauthor = \"A\"\n%s", cases[i].toml_extra) > 0);
+    struct TempConfig temp_config;
+    if (write_temp_config(&temp_config, toml) != 0) {
+      continue;
+    }
+    struct GalleryConfig config;
+    gallery_config_init(&config);
+    struct Log log = test_log();
+    TEST_CHECK(load_gallery_config(&config, temp_config.path, &log) == 0);
+    TEST_CHECK(config.album_sort_order == cases[i].album_sort_order);
+    TEST_CHECK(config.media_sort_order == cases[i].media_sort_order);
+    TEST_MSG("case %td", i);
+    remove_fixture_tree(temp_config.root_dir);
+  }
+}
+
+// An empty `[sort]` table is accepted and keeps both defaults, unlike an empty `derivatives` table,
+// which is rejected.
+static void test_load_accepts_empty_sort_table(void) {
+  const char toml[] =
+      "title = \"Example Gallery\"\n"
+      "author = \"Example Author\"\n"
+      "[sort]\n";
+  struct TempConfig temp_config;
+  if (write_temp_config(&temp_config, toml) != 0) {
+    return;
+  }
+
+  struct GalleryConfig config;
+  gallery_config_init(&config);
+  struct Log log = test_log();
+  TEST_CHECK(load_gallery_config(&config, temp_config.path, &log) == 0);
+  TEST_CHECK(config.album_sort_order == GALLERY_SORT_ASC);
+  TEST_CHECK(config.media_sort_order == GALLERY_SORT_ASC);
 
   remove_fixture_tree(temp_config.root_dir);
 }
@@ -634,8 +693,8 @@ static void test_load_rejects_unknown_keys(void) {
   }
 }
 
-// Only `derivatives` holds a table, so a table under any other known key fails that key's type
-// check.
+// Only `derivatives` and `sort` hold a table, so a table under any other known key fails that key's
+// type check.
 static void test_load_rejects_table_values(void) {
   static const char* const cases[][2] = {
       {"author = \"Example Author\"\n[title]\nname = \"Example Gallery\"\n",
@@ -902,6 +961,53 @@ static void test_load_rejects_invalid_derivative_tables(void) {
       expected_count);
 }
 
+// The `sort` table must be a table, holds only its two keys, and each key takes exactly the
+// lowercase string `asc` or `desc`. A case variant, a longer word, and an empty string are each
+// rejected and named. A value holding a `NUL` byte is rejected without being named, since printing
+// it would stop at the `NUL`.
+static void test_load_rejects_invalid_sort_tables(void) {
+  check_load_rejects("sort = \"desc\"\n", "config key 'sort' must be a table");
+  check_load_rejects("sort = { album = \"desc\" }\n", "unknown config key 'sort.album'");
+  check_load_rejects("sort = { media = 1 }\n", "config key 'sort.media' must be a string");
+  check_load_rejects("sort = { albums = \"ASC\" }\n",
+                     "config key 'sort.albums' must be 'asc' or 'desc': 'ASC'");
+  check_load_rejects("sort = { media = \"descending\" }\n",
+                     "config key 'sort.media' must be 'asc' or 'desc': 'descending'");
+  check_load_rejects("sort = { media = \"\" }\n",
+                     "config key 'sort.media' must be 'asc' or 'desc': ''");
+  check_load_rejects("sort = { albums = \"a\\u0000sc\" }\n",
+                     "config key 'sort.albums' must not contain a NUL byte");
+}
+
+// Every invalid key in a `sort` table is reported in one load: the unknown key first, then each
+// order in schema order. A rejected order is never stored, so a field the caller had already set
+// keeps that value rather than falling back to `asc`.
+static void test_load_reports_every_invalid_sort_key(void) {
+  struct TempConfig temp_config;
+  if (write_temp_config(&temp_config,
+                        "title = \"Example Gallery\"\n"
+                        "author = \"Example Author\"\n"
+                        "sort = { albums = \"up\", order = \"asc\", media = 1 }\n") != 0) {
+    return;
+  }
+
+  struct GalleryConfig config;
+  gallery_config_init(&config);
+  config.album_sort_order = GALLERY_SORT_DESC;
+  config.media_sort_order = GALLERY_SORT_DESC;
+  struct Log log = test_log();
+  TEST_CHECK(load_gallery_config(&config, temp_config.path, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "unknown config key 'sort.order'\n"
+                         "config key 'sort.albums' must be 'asc' or 'desc': 'up'\n"
+                         "config key 'sort.media' must be a string\n"));
+  TEST_CHECK(log.errors == 3);
+  TEST_CHECK(config.album_sort_order == GALLERY_SORT_DESC);
+  TEST_CHECK(config.media_sort_order == GALLERY_SORT_DESC);
+
+  remove_fixture_tree(temp_config.root_dir);
+}
+
 // Printing emits every key, with the defaults `gallery_config_init` supplies for the optional ones.
 // `title` and `author` have no default and are set here so the output shows each. A derivative
 // prints `crop` only when it crops.
@@ -929,6 +1035,7 @@ static void test_print_defaults(void) {
                     "derivatives = { s = { width = 120, height = 120, quality = 70, crop = true }, "
                     "m = { width = 520, height = 360, quality = 80, crop = true }, "
                     "l = { width = 792, height = 594, quality = 85 } }\n"
+                    "sort = { albums = \"asc\", media = \"asc\" }\n"
                     "video_frame_seconds = 1\n") == 0);
 }
 
@@ -958,12 +1065,14 @@ static void test_print_escapes_strings(void) {
                     "derivatives = { s = { width = 120, height = 120, quality = 70, crop = true }, "
                     "m = { width = 520, height = 360, quality = 80, crop = true }, "
                     "l = { width = 792, height = 594, quality = 85 } }\n"
+                    "sort = { albums = \"asc\", media = \"asc\" }\n"
                     "video_frame_seconds = 1\n") == 0);
 }
 
 // Printing a config and loading the printed output back yields the same field values, exercising
 // the round-trip invariant documented on `gallery_config_print` across escaped strings (including a
-// `U+007F` byte), multi-element template arrays, and cropping and non-cropping derivatives.
+// `U+007F` byte), multi-element template arrays, cropping and non-cropping derivatives, and two
+// different sort orders.
 static void test_print_load_round_trips(void) {
   static const struct Str aggregates[] = {STR_INIT("sitemap.xml"), STR_INIT("about/index.html")};
   static const struct GalleryDerivative derivatives[] = {
@@ -990,6 +1099,8 @@ static void test_print_load_round_trips(void) {
   config.aggregate_template_count = 2;
   config.derivatives = derivatives;
   config.derivative_count = 2;
+  config.album_sort_order = GALLERY_SORT_DESC;
+  config.media_sort_order = GALLERY_SORT_ASC;
   config.video_frame_seconds = 0;
 
   char config_out[2048];
@@ -1028,6 +1139,8 @@ static void test_print_load_round_trips(void) {
     TEST_CHECK(reloaded.derivatives[i].quality == derivatives[i].quality);
     TEST_CHECK(reloaded.derivatives[i].is_crop == derivatives[i].is_crop);
   }
+  TEST_CHECK(reloaded.album_sort_order == config.album_sort_order);
+  TEST_CHECK(reloaded.media_sort_order == config.media_sort_order);
   TEST_CHECK(reloaded.video_frame_seconds == config.video_frame_seconds);
 
 cleanup:
@@ -1077,6 +1190,7 @@ static void test_print_empty_template_array(void) {
                     "derivatives = { s = { width = 120, height = 120, quality = 70, crop = true }, "
                     "m = { width = 520, height = 360, quality = 80, crop = true }, "
                     "l = { width = 792, height = 594, quality = 85 } }\n"
+                    "sort = { albums = \"asc\", media = \"asc\" }\n"
                     "video_frame_seconds = 1\n") == 0);
 
 cleanup:
@@ -1137,6 +1251,8 @@ TEST_LIST = {
     {"load normalizes directory keys", test_load_normalizes_directory_keys},
     {"load normalizes base url", test_load_normalizes_base_url},
     {"load leaves directory overlap to the build", test_load_leaves_directory_overlap_to_the_build},
+    {"load reads sort orders independently", test_load_reads_sort_orders_independently},
+    {"load accepts empty sort table", test_load_accepts_empty_sort_table},
     {"load accepts zero video frame seconds", test_load_accepts_zero_video_frame_seconds},
     {"load rejects missing file", test_load_rejects_missing_file},
     {"load rejects oversize file", test_load_rejects_oversize_file},
@@ -1160,6 +1276,8 @@ TEST_LIST = {
     {"load rejects integer upper bounds", test_load_rejects_integer_upper_bounds},
     {"load rejects dimension product overflow", test_load_rejects_dimension_product_overflow},
     {"load rejects invalid derivative tables", test_load_rejects_invalid_derivative_tables},
+    {"load rejects invalid sort tables", test_load_rejects_invalid_sort_tables},
+    {"load reports every invalid sort key", test_load_reports_every_invalid_sort_key},
     {"print defaults", test_print_defaults},
     {"print escapes strings", test_print_escapes_strings},
     {"print load round trips", test_print_load_round_trips},

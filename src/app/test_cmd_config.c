@@ -121,6 +121,7 @@ static void test_prints_loaded_config(void) {
                     "derivatives = { s = { width = 120, height = 120, quality = 70, crop = true }, "
                     "m = { width = 520, height = 360, quality = 80, crop = true }, "
                     "l = { width = 792, height = 594, quality = 85 } }\n"
+                    "sort = { albums = \"asc\", media = \"asc\" }\n"
                     "video_frame_seconds = 1\n") == 0);
 
 cleanup:
@@ -163,6 +164,7 @@ static void test_prints_empty_template_array(void) {
                     "derivatives = { s = { width = 120, height = 120, quality = 70, crop = true }, "
                     "m = { width = 520, height = 360, quality = 80, crop = true }, "
                     "l = { width = 792, height = 594, quality = 85 } }\n"
+                    "sort = { albums = \"asc\", media = \"asc\" }\n"
                     "video_frame_seconds = 1\n") == 0);
 
 cleanup:

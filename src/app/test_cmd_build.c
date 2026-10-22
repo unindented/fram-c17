@@ -334,6 +334,32 @@ static void test_builds_an_album_with_no_media_of_its_own(void) {
   TEST_CHECK(os_memory_has_path(os, "public/container/inner/index.html"));
 }
 
+// The configured sort orders reach the rendered pages. With both descending, the root page lists
+// its media and its sub-albums last name first, and each sub-album's cover is its last file by
+// name, the first it lists.
+static void test_renders_configured_sort_orders(void) {
+  struct Os* os = os_memory();
+  struct Log log = test_log();
+  write_gallery_fixture(os,
+                        "album_template = \"sorted.html\"\n"
+                        "sort = { albums = \"desc\", media = \"desc\" }\n");
+  write_jpeg(os, "photos/a.jpg");
+  write_jpeg(os, "photos/b.jpg");
+  write_jpeg(os, "photos/x/1.jpg");
+  write_jpeg(os, "photos/x/2.jpg");
+  write_jpeg(os, "photos/y/1.jpg");
+  write_jpeg(os, "photos/y/2.jpg");
+  os_memory_write(os, "templates/sorted.html",
+                  "{{#media}}{{title}} {{/media}}|"
+                  "{{#sub_albums}} {{title}}:{{cover.title}}{{/sub_albums}}\n");
+
+  TEST_CHECK(execute_build(os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+
+  TEST_CHECK(os_memory_is_file(os, "public/index.html", "b.jpg a.jpg | y:2.jpg x:2.jpg\n"));
+  TEST_CHECK(os_memory_is_file(os, "public/x/index.html", "2.jpg 1.jpg |\n"));
+}
+
 // A second build over a finished output tree succeeds and produces the same set of outputs.
 static void test_rebuild_succeeds_and_repeats_its_outputs(void) {
   struct Os* os = os_memory();
@@ -922,6 +948,7 @@ TEST_LIST = {
     {"copies static files when present", test_copies_static_files_when_present},
     {"distinguishes same name in different dirs", test_distinguishes_same_name_in_different_dirs},
     {"builds an album with no media of its own", test_builds_an_album_with_no_media_of_its_own},
+    {"renders configured sort orders", test_renders_configured_sort_orders},
     {"rebuild succeeds and repeats its outputs", test_rebuild_succeeds_and_repeats_its_outputs},
     {"builds and rebuilds with output dir holding input dir",
      test_builds_and_rebuilds_with_output_dir_holding_input_dir},
