@@ -675,6 +675,19 @@ static void test_reports_a_rejected_directory_key_once(void) {
   TEST_CASE_(NULL);
 }
 
+// A rejected `static_dir` is reported once too, even when its default names something that would
+// fail on its own: here a regular file, which the static walk would report as not a directory.
+static void test_reports_a_rejected_static_dir_once(void) {
+  struct Os* os = os_memory();
+  struct Log log = test_log();
+  write_gallery_fixture(os, "static_dir = \"\"\n");
+  write_jpeg(os, "photos/album/one.jpg");
+  os_memory_write(os, "static", "not a directory\n");
+
+  TEST_CHECK(execute_build(os, &log) == -1);
+  TEST_CHECK(test_log_is_one(&log, "config key 'static_dir' must not be empty"));
+}
+
 // A `templates_dir` that exists but is a regular file is reported as the wrong type, which is its
 // own cause rather than an `errno`, so the message carries no system text.
 static void test_reports_templates_dir_that_is_a_file(void) {
@@ -980,6 +993,7 @@ TEST_LIST = {
     {"reports absent input dir", test_reports_absent_input_dir},
     {"reports absent templates dir", test_reports_absent_templates_dir},
     {"reports a rejected directory key once", test_reports_a_rejected_directory_key_once},
+    {"reports a rejected static dir once", test_reports_a_rejected_static_dir_once},
     {"reports templates dir that is a file", test_reports_templates_dir_that_is_a_file},
     {"reports unusable output dir", test_reports_unusable_output_dir},
     {"reports dangling output dir symlink", test_reports_dangling_output_dir_symlink},
