@@ -218,8 +218,8 @@ static void test_writes_exactly_manifest_outputs(void) {
   struct Os* os = os_memory();
   static const char* const expected[] = {
       "public/_fram/originals/album/one-jpg.jpg",
-      "public/_fram/v1-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.jpg",
-      "public/_fram/v1-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.jpg",
+      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.jpg",
+      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.jpg",
       "public/album/index.html",
       "public/fram.css",
       "public/index.html",
@@ -259,8 +259,8 @@ static void test_tolerates_trailing_slash_on_input_dir(void) {
   // No output, page, derivative or original, carries the name of `input_dir`.
   static const char* const expected[] = {
       "public/_fram/originals/album/one-jpg.jpg",
-      "public/_fram/v1-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.jpg",
-      "public/_fram/v1-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.jpg",
+      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.jpg",
+      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.jpg",
       "public/album/index.html",
       "public/index.html",
   };
@@ -764,7 +764,7 @@ static void test_rejects_colliding_source_names(void) {
       test_log_is(&log,
                   "duplicate output path for 'photos/album/cafc3a9.jpg' and "
                   "'photos/album/caf\xC3\xA9.jpg': "
-                  "'public/_fram/v1-s-8x8c-q70-m-16x16-q75-f1000/album/cafc3a9-jpg-s.jpg'\n"));
+                  "'public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/cafc3a9-jpg-s.jpg'\n"));
   TEST_CHECK(log.errors == 1);
   TEST_CHECK(!os_memory_has_path(os, "public"));
 }
@@ -838,10 +838,10 @@ static void test_reports_one_line_per_failing_media_item(void) {
   // Sources are walked in sorted order, so `a.jpg` precedes `b.jpg`. Compared whole, with the
   // separator in the middle, so a dropped newline or a lost line both fail here.
   TEST_CHECK(test_log_is(&log,
-                         "failed to probe media: failed to probe JPEG: unknown image type "
-                         "('photos/album/a.jpg')\n"
-                         "failed to probe media: failed to probe JPEG: unknown image type "
-                         "('photos/album/b.jpg')\n"));
+                         "failed to probe media: failed to probe JPEG: Not a JPEG file: starts "
+                         "with 0x6e 0x6f ('photos/album/a.jpg')\n"
+                         "failed to probe media: failed to probe JPEG: Not a JPEG file: starts "
+                         "with 0x6e 0x6f ('photos/album/b.jpg')\n"));
   TEST_CHECK(log.errors == 2);
 }
 
@@ -864,20 +864,20 @@ static void test_reports_every_independent_error(void) {
   TEST_CHECK(execute_build(os, &log) == -1);
   TEST_CHECK(test_log_is(&log,
                          "unknown config key 'colour'\n"
-                         "failed to probe media: failed to probe JPEG: unknown image type "
-                         "('photos/album/bad-a.jpg')\n"
-                         "failed to probe media: failed to probe JPEG: unknown image type "
-                         "('photos/album/bad-b.jpg')\n"
+                         "failed to probe media: failed to probe JPEG: Not a JPEG file: starts "
+                         "with 0x6e 0x6f ('photos/album/bad-a.jpg')\n"
+                         "failed to probe media: failed to probe JPEG: Not a JPEG file: starts "
+                         "with 0x6e 0x6f ('photos/album/bad-b.jpg')\n"
                          "duplicate output path for 'photos/album/cafc3a9.jpg' and "
                          "'photos/album/caf\xC3\xA9.jpg': "
-                         "'public/_fram/v1-s-8x8c-q70-m-16x16-q75-f1000/album/cafc3a9-jpg-s.jpg'\n"
+                         "'public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/cafc3a9-jpg-s.jpg'\n"
                          "duplicate output path for 'photos' and 'static/index.html': "
                          "'public/index.html'\n"));
   TEST_CHECK(log.errors == 5);
   TEST_CHECK(!os_memory_has_path(os, "public"));
 }
 
-// A JPEG over the decoder's input limit is rejected by its probe read. The file is sparse, so the
+// A JPEG over the media read limit is rejected by its probe read. The file is sparse, so the
 // fixture costs no memory.
 static void test_rejects_oversize_source_at_probe(void) {
   const ptrdiff_t big_source_len = (ptrdiff_t)4 * 1024 * 1024 * 1024;

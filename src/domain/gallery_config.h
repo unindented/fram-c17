@@ -26,7 +26,7 @@ struct Os;
 extern const struct Str GALLERY_CONFIG_PATH_DEFAULT;
 
 /** Stable derivative recipe version. Increment when output bytes must be regenerated. */
-enum { DERIVATIVE_RECIPE_VERSION = 1 };
+enum { DERIVATIVE_RECIPE_VERSION = 2 };
 
 /** Largest accepted derivative-name length, excluding the terminating `NUL`. */
 enum { GALLERY_DERIVATIVE_NAME_LEN_MAX = 15 };

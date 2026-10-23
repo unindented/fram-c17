@@ -19,11 +19,23 @@ enum { IMAGE_DIMENSION_MAX = 20000 };
 enum { IMAGE_PIXEL_COUNT_MAX = 100000000 };
 
 /**
- * Longest encoded input stb can take, in bytes. stb addresses its input with an `int`. A caller
- * that reads a JPEG from disk passes this bound to `os_read`, so an oversize file is rejected from
- * its size before it is loaded.
+ * Longest JPEG a caller reads, in bytes, far longer than any JPEG within `IMAGE_PIXEL_COUNT_MAX`
+ * needs. A caller passes this bound to `os_read`, so an oversize file is rejected from its size
+ * before it is loaded, and a worker's scratch holds one source of this length.
  */
 enum { IMAGE_INPUT_LEN_MAX = INT_MAX };
+
+/**
+ * Scale of a full-size decode, in eighths. `image_decode` scales each dimension by
+ * `scale_eighths / IMAGE_SCALE_FULL`, for `scale_eighths` from 1 through `IMAGE_SCALE_FULL`.
+ */
+enum { IMAGE_SCALE_FULL = 8 };
+
+/**
+ * Bytes, for each pixel of an encoded image, that resizing to it and encoding it hold: the resized
+ * pixels' three, beside the encoder's working memory, which the JPEG writer keeps to a few tables.
+ */
+enum { IMAGE_ENCODE_LEN_PER_PX = IMAGE_CHANNEL_COUNT };
 
 /** Largest JPEG output the encoder passes on, in bytes. A longer encode fails partway. */
 enum { IMAGE_ENCODED_LEN_MAX = 512 * 1024 * 1024 };
@@ -55,6 +67,23 @@ enum ImageOrientation {
   IMAGE_ORIENTATION_LEFT_BOTTOM = 8,
 };
 
+/** What a JPEG's header says about the image and the memory a decode of it holds. */
+struct ImageHeader {
+  /** Width in pixels, from 1 through `IMAGE_DIMENSION_MAX`. */
+  ptrdiff_t width_px;
+
+  /** Height in pixels, from 1 through `IMAGE_DIMENSION_MAX`. */
+  ptrdiff_t height_px;
+
+  /**
+   * Bytes of DCT coefficients a decode holds at any scale, beside its pixels. A progressive or
+   * other multi-scan JPEG keeps a coefficient for every block of the full-size image for the whole
+   * decode, two bytes for each of a component's samples. A single-scan JPEG decodes row by row and
+   * holds none, so this is `0`.
+   */
+  ptrdiff_t coefficient_len;
+};
+
 /**
  * One malloc-owned, 8-bit image in interleaved RGB order.
  *
@@ -77,44 +106,83 @@ struct Image {
 };
 
 /**
- * @brief Reads JPEG dimensions without decoding its pixels.
+ * @brief Reads a JPEG's header without decoding its pixels.
  *
- * This rejects more than `IMAGE_INPUT_LEN_MAX` bytes.
+ * This rejects a JPEG that `image_decode` cannot decode for its header alone: a sample precision
+ * other than 8 bits, a lossless JPEG, which libjpeg-turbo decodes only at full size, or a color
+ * space other than grayscale, YCbCr, RGB, CMYK, or YCCK. A 1 x 1 lossless RGB JPEG is the
+ * exception: no scale changes its size, so it probes and decodes.
  *
- * @param data       JPEG bytes. More than `IMAGE_INPUT_LEN_MAX` is rejected.
- * @param width_out  Receives the width on success. Must not be `NULL`.
- * @param height_out Receives the height on success. Must not be `NULL`.
+ * @param data       JPEG bytes.
+ * @param header_out Receives the header on success. Must not be `NULL`.
  * @param operation  Operation leading the failure message.
  * @param file_path  File the bytes were read from or go to, named at the end of the message.
  * @param log        Log that receives the failure. Must not be `NULL`.
- * @return `0` on success, or `-1` for invalid JPEG data or dimensions.
+ * @return `0` on success, or `-1` for invalid or unsupported JPEG data or dimensions.
  */
 int image_probe(struct Str data,
-                ptrdiff_t* width_out,
-                ptrdiff_t* height_out,
+                struct ImageHeader* header_out,
                 struct Str operation,
                 struct Str file_path,
-                struct Log* log) __attribute__((nonnull(2, 3, 6)));
+                struct Log* log) __attribute__((nonnull(2, 5)));
 
 /**
- * @brief Decodes JPEG bytes into a malloc-owned RGB image.
+ * @brief Decodes JPEG bytes into a malloc-owned RGB image, scaled down in the DCT.
  *
- * stb decodes at full resolution. Like `image_probe`, this rejects more than `IMAGE_INPUT_LEN_MAX`
- * input bytes.
+ * libjpeg-turbo scales while it decodes, so a reduced scale decodes fewer pixels rather than
+ * shrinking a full-size image, and the image has the dimensions `image_scale_size` gives. A CMYK or
+ * YCCK JPEG is converted to RGB. Like `image_probe`, this rejects an unsupported header, and it
+ * rejects a JPEG of more than 100 scans, which only a hostile file has. A corrupt scan decodes as
+ * far as the data allows rather than failing, and so do damaged bytes after the last row.
  *
- * @param data      JPEG bytes. More than `IMAGE_INPUT_LEN_MAX` is rejected.
- * @param image_out Receives the decoded image on success and is zeroed on failure. Must not be
- *                  `NULL`.
- * @param operation Operation leading the failure message.
- * @param file_path File the bytes were read from or go to, named at the end of the message.
- * @param log       Log that receives the failure. Must not be `NULL`.
- * @return `0` on success, or `-1` for invalid JPEG data or dimensions.
+ * @param data          JPEG bytes.
+ * @param scale_eighths Scale of each dimension, in eighths, from 1 through `IMAGE_SCALE_FULL`.
+ * @param image_out     Receives the decoded image on success and is zeroed on failure. Must not be
+ *                      `NULL`.
+ * @param operation     Operation leading the failure message.
+ * @param file_path     File the bytes were read from or go to, named at the end of the message.
+ * @param log           Log that receives the failure. Must not be `NULL`.
+ * @return `0` on success, or `-1` for invalid or unsupported JPEG data or dimensions.
  */
 int image_decode(struct Str data,
+                 ptrdiff_t scale_eighths,
                  struct Image* image_out,
                  struct Str operation,
                  struct Str file_path,
-                 struct Log* log) __attribute__((nonnull(2, 5)));
+                 struct Log* log) __attribute__((nonnull(3, 6)));
+
+/**
+ * @brief Returns the most bytes that decoding a JPEG and then orienting it hold at once.
+ *
+ * The decode holds its scaled pixels beside a multi-scan JPEG's coefficients, which it releases
+ * before it returns. A rotated or mirrored orientation then holds two copies of the pixels while it
+ * runs. The result is the larger of the two.
+ *
+ * @param header        Header `image_probe` read. Must not be `NULL`.
+ * @param scale_eighths Decode scale, from 1 through `IMAGE_SCALE_FULL`.
+ * @param orientation   Orientation `image_orient` is given afterwards.
+ * @return Bytes the decode and orientation hold at their peak.
+ */
+ptrdiff_t image_decode_len(const struct ImageHeader* header,
+                           ptrdiff_t scale_eighths,
+                           enum ImageOrientation orientation) __attribute__((nonnull(1)));
+
+/**
+ * @brief Returns the dimensions `image_decode` produces at a scale.
+ *
+ * Each dimension is rounded up, so none scales to zero.
+ *
+ * @param width_px      Full-size width in pixels, from 1 through `IMAGE_DIMENSION_MAX`.
+ * @param height_px     Full-size height in pixels, from 1 through `IMAGE_DIMENSION_MAX`.
+ * @param scale_eighths Scale of each dimension, in eighths, from 1 through `IMAGE_SCALE_FULL`.
+ * @param width_out     Receives the scaled width. Must not be `NULL`.
+ * @param height_out    Receives the scaled height. Must not be `NULL`.
+ */
+void image_scale_size(ptrdiff_t width_px,
+                      ptrdiff_t height_px,
+                      ptrdiff_t scale_eighths,
+                      ptrdiff_t* width_out,
+                      ptrdiff_t* height_out) __attribute__((nonnull(4, 5)));
 
 /**
  * @brief Applies an EXIF orientation to an image in place.
@@ -249,10 +317,11 @@ void image_orient_size(enum ImageOrientation orientation,
 /**
  * @brief Allocates `size` bytes like `malloc`, calling `os_oom` instead of returning a failure.
  *
- * This is the allocator behind every pixel buffer: the ones this module allocates, and stb's own
- * output and working memory, which `vendor/stb/stb.c` routes here through stb's allocator hooks. A
- * failed pixel allocation therefore ends the build like any other failed allocation, and the report
- * names the file, rather than reaching a caller as a decode error. Release the memory with `free`.
+ * This is the allocator behind every pixel buffer this module allocates, and behind the working
+ * memory of stb's resizer and JPEG writer, which `vendor/stb/stb.c` routes here through stb's
+ * allocator hooks. A failed pixel allocation therefore ends the build like any other failed
+ * allocation, and the report names the file, rather than reaching a caller as a decode error.
+ * Release the memory with `free`.
  *
  * @param size Bytes to allocate. A request above `PTRDIFF_MAX` cannot succeed and calls `os_oom`.
  * @return The allocation. `NULL` only for a zero `size`, as `malloc` allows.

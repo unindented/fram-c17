@@ -62,7 +62,7 @@ The media and template directories must exist. The static directory is optional:
 
 The build copies every file below `static_dir` into `output_dir` as-is, keeping its path relative to `static_dir`. A top-level file such as `static/robots.txt` lands at `output_dir/robots.txt`, and `static/assets/gallery.css` lands at `output_dir/assets/gallery.css`. A static file that names the same output path as a generated page, derivative, or aggregate template output is rejected as a conflict, not overwritten.
 
-The build rejects an input file that is too large before it reads the file: a JPEG source or video poster frame over 2,147,483,647 bytes (the decoder's input limit, just under 2 GiB), a config file over 1 MiB, or a template or partial over 4 MiB. The error message gives the limit and the file size.
+The build rejects an input file that is too large before it reads the file: a JPEG source or video poster frame over 2,147,483,647 bytes (just under 2 GiB), a config file over 1 MiB, or a template or partial over 4 MiB. The error message gives the limit and the file size.
 
 The build reserves its memory once, when it starts, in fixed sizes that these limits bound. Reserved memory that the build does not use costs address space but no memory. Decoded images are not part of the reservation. Under an address-space limit (`ulimit -v`) that refuses the reservation, the build first halves its worker count, down to one, and then halves the reservation until it fits, up to six times, and once more to leave room for the memory it does not reserve, such as decoded images, and then holds correspondingly less. So the limit a build needs does not grow with `-w`: it needs about 280 MB (`ulimit -v 270000`), and under less it stops at startup with `fram: out of memory`. A limit that leaves less room beside a reservation that fits than the worker threads' stacks need, about 24 MB at two workers, makes the build fail with `cannot start worker thread`. A build that needs more than it reserved or than the limit leaves, such as a template whose nested sections expand without bound or a decode too large for the memory left, prints the errors the command and the failing job logged so far and `fram: out of memory (in '<file>')`, and exits with status 1. Each worker keeps the errors it reports in at least 256 MiB, so a worker that reports about a million one-line errors, or about 290 files that each hold about 16,000 unknown keys, can also end the build in that report.
 
@@ -131,7 +131,7 @@ Each directory below `input_dir` that contains matching media or an album descen
 
 Each JPEG produces every configured derivative and a copied original. The tool applies EXIF orientation before sizing the derivatives, then applies each derivative's crop policy independently. Each MP4 produces the same derivative set from an auto-rotated poster frame, while its copied original remains the video played by the gallery.
 
-A source image can have at most 100 million pixels. Derivative workers share one budget of 200 million decoded pixels, so decode memory does not grow with `--workers`: two maximum-size images decode at once, or eight 24-megapixel photos.
+A source image can have at most 100 million pixels. Each source is decoded scaled down, in eighths, to the smallest size that leaves its stale derivatives at least twice their size to resize from, so a large photo decodes a fraction of its pixels. Derivative workers share one memory budget of about 2 GiB for decoding sources and writing derivatives, so that memory does not grow with `--workers`: at least two maximum-size images decode at once, and more of smaller ones.
 
 Generated derivatives live at `_fram/<recipe>/<album-slug>/<media-slug>-<derivative>.jpg`, where the media slug includes the source extension (`foo.jpg` becomes `foo-jpg`). The recipe name includes every derivative name, dimensions, crop policy, JPEG quality, poster-frame position, and derivative algorithm version. All derivatives for one media item therefore share one album directory. Originals live at `_fram/originals/<album-slug>/<media-slug>.<source-extension>`. Changing an output-affecting setting cannot reuse derivatives from an older recipe.
 
@@ -190,8 +190,8 @@ Vendored dependencies are included under `vendor/`:
 - [`sharedstuff`](https://github.com/unindented/sharedstuff-c17): Arena allocation, counted strings, output buffers, and the diagnostic log.
 - [`copt`](https://github.com/fardaniqbal/copt): Command line option parsing.
 - [`tomlc17`](https://github.com/cktan/tomlc17): TOML configuration parsing.
-- [`libjpeg-turbo`](https://github.com/libjpeg-turbo/libjpeg-turbo): JPEG codec.
-- [`stb`](https://github.com/nothings/stb): JPEG decoding and encoding.
+- [`libjpeg-turbo`](https://github.com/libjpeg-turbo/libjpeg-turbo): JPEG decoding.
+- [`stb`](https://github.com/nothings/stb): JPEG encoding.
 - [`stb_image_resize`](https://github.com/nothings/stb_image_resize): Image resizing.
 - [`mustache4c`](https://github.com/mity/mustache4c): Mustache template rendering.
 - [`acutest`](https://github.com/mity/acutest): Tests.

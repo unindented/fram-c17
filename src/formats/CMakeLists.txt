@@ -6,7 +6,7 @@ target_sources(
          FILES exif.h html.h image.h toml.h
 )
 
-target_link_libraries(fram_app PRIVATE fram_vendor_stb)
+target_link_libraries(fram_app PRIVATE fram_vendor_libjpeg_turbo fram_vendor_stb)
 
 if(FRAM_BUILD_TESTING)
   foreach(module IN ITEMS exif html image toml)

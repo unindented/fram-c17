@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "formats/image.h"
 #include "shared/arena.h"
 
 struct GalleryConfig;
@@ -56,5 +57,30 @@ int derivative_renderer_generate(const struct GalleryConfig* gallery_config,
                                  struct Os* os,
                                  struct Arena scratch,
                                  struct Log* log) __attribute__((nonnull(1, 2, 4, 6, 8, 10)));
+
+/**
+ * @brief Returns the scale a source is decoded at to write its stale derivatives.
+ *
+ * This is the smallest eighth at which every stale derivative's source region, cropped as
+ * configured, is still at least twice the derivative in each dimension, so the resizer, and not
+ * the decoder's DCT reduction, does the final reduction. A source too small for that at any
+ * reduced scale decodes at full size.
+ *
+ * @param gallery_config Configured derivatives. Must not be `NULL`.
+ * @param item           Media item, with one derivative per configured one. Must not be `NULL`.
+ * @param is_stale       One flag per derivative of the item, `true` where the output is rewritten.
+ *                       Must not be `NULL`.
+ * @param width_px       Stored width of the source, as its JPEG header gives it.
+ * @param height_px      Stored height of the source, as its JPEG header gives it.
+ * @param orientation    Orientation the decoded source is given.
+ * @return The decode scale, in eighths, from 1 through `IMAGE_SCALE_FULL`.
+ */
+ptrdiff_t derivative_renderer_decode_scale(const struct GalleryConfig* gallery_config,
+                                           const struct MediaItem* item,
+                                           const bool* is_stale,
+                                           ptrdiff_t width_px,
+                                           ptrdiff_t height_px,
+                                           enum ImageOrientation orientation)
+    __attribute__((nonnull(1, 2, 3)));
 
 #endif

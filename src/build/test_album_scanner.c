@@ -218,10 +218,10 @@ static void test_build_skeleton_derives_nested_gallery(void) {
   TEST_CHECK(media[0]->derivative_count == 3);
   TEST_CHECK(str_eq(media[0]->derivatives[0].name, S("s")));
   TEST_CHECK(str_eq(media[0]->derivatives[0].url,
-                    S("_fram/v1-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
+                    S("_fram/v2-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
                       "2024/japan/a-jpg-s.jpg")));
   TEST_CHECK(str_eq(media[0]->derivatives[0].path,
-                    S("/public/_fram/v1-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
+                    S("/public/_fram/v2-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
                       "2024/japan/a-jpg-s.jpg")));
   TEST_CHECK(str_eq(media[1]->original_url, S("_fram/originals/2024/japan/clip-mp4.mp4")));
   TEST_CHECK(albums[2]->media_count == 2);
@@ -329,7 +329,7 @@ static void test_build_skeleton_humanizes_album_title(void) {
   TEST_CHECK(str_eq(albums[1]->url_path, S("john-white-alexander/index.html")));
   TEST_CHECK(str_eq(media[0]->title, S("My Photo.JPG")));
   TEST_CHECK(str_eq(media[0]->derivatives[0].url,
-                    S("_fram/v1-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
+                    S("_fram/v2-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
                       "john-white-alexander/my-photo-jpg-s.jpg")));
 }
 
@@ -354,7 +354,7 @@ static void test_build_skeleton_slugs_internal_namespace_source(void) {
   TEST_CHECK(str_eq(albums[1]->slug_path, S("fram")));
   TEST_CHECK(str_eq(albums[1]->url_path, S("fram/index.html")));
   TEST_CHECK(str_eq(media[0]->derivatives[0].url,
-                    S("_fram/v1-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
+                    S("_fram/v2-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
                       "fram/x-jpg-s.jpg")));
 }
 
@@ -688,9 +688,9 @@ static void test_probe_media_collects_failure(void) {
   TEST_CHECK(!frames[0].is_created);
 }
 
-// A source larger than the decoder's `IMAGE_INPUT_LEN_MAX` input limit fails its probe at the read,
-// from its size, naming the limit and the size, rather than loaded whole and turned away by the
-// decoder. The file is sparse, so the fixture costs no memory.
+// A source larger than `IMAGE_INPUT_LEN_MAX`, the media read limit, fails its probe at the read,
+// from its size, naming the limit and the size, rather than being loaded whole. The file is sparse,
+// so the fixture costs no memory.
 static void test_probe_media_rejects_oversize_source(void) {
   struct Os* os = os_memory();
   struct Arena arena = test_arena();

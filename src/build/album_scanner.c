@@ -823,12 +823,12 @@ static int probe_image(struct MediaItem* item,
   if (os_read(os, item->source_path, IMAGE_INPUT_LEN_MAX, &scratch, &data, operation, log) != 0) {
     return -1;
   }
-  ptrdiff_t width = 0;
-  ptrdiff_t height = 0;
-  const int rc = image_probe(data, &width, &height, operation, item->source_path, log);
+  struct ImageHeader header;
+  const int rc = image_probe(data, &header, operation, item->source_path, log);
   if (rc == 0) {
     item->orientation = exif_read_orientation(data);
-    image_orient_size(item->orientation, width, height, &item->width_px, &item->height_px);
+    image_orient_size(item->orientation, header.width_px, header.height_px, &item->width_px,
+                      &item->height_px);
   }
   // The worker's scratch region outlives the job, so a large source's pages are given back.
   if (data.len >= JOB_SOURCE_DISCARD_LEN_MIN) {
@@ -881,5 +881,11 @@ static int probe_frame(struct Str source_path,
   if (os_read(os, frame_path, IMAGE_INPUT_LEN_MAX, &scratch, &data, read_operation, log) != 0) {
     return -1;
   }
-  return image_probe(data, width_out, height_out, operation, source_path, log);
+  struct ImageHeader header;
+  if (image_probe(data, &header, operation, source_path, log) != 0) {
+    return -1;
+  }
+  *width_out = header.width_px;
+  *height_out = header.height_px;
+  return 0;
 }

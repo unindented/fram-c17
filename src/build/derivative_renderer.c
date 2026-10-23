@@ -20,44 +20,50 @@
 #include "shared/str.h"
 
 /**
- * Largest total pixel count that derivative jobs hold decoded at once, across every worker.
- *
- * A job holds a decoded source from the start of its decode to the end of its last derivative
- * write, and its memory grows with the source's pixel count rather than its file size. A JPEG of a
- * few hundred bytes can declare `IMAGE_PIXEL_COUNT_MAX` pixels, and stb then zero-fills the scans
- * the file lacks. Measured in a release build at that size, one decode peaks at 573 MiB for a
- * baseline JPEG and 1146 MiB for a progressive one, whose coefficient buffers stb allocates in
- * full. `IMAGE_PIXEL_COUNT_MAX` bounds one decode but not how many run together, and one per worker
- * multiplies it by the core count: eight such files take a build on 10 cores to 9.9 GB peak RSS
- * with no shared bound.
- *
- * Two maximum-size decodes fit, so worst-case decode memory is about 2.2 GiB whatever the worker
- * count, and the same eight files peak at 2.4 GB. The bound still admits eight 24-megapixel photos
- * at once, so an ordinary gallery keeps one decode per core on most machines.
+ * Bytes the largest decode can hold, as `image_decode_len` counts it: `IMAGE_PIXEL_COUNT_MAX`
+ * pixels at full size, three bytes each, beside the coefficients of a progressive CMYK JPEG, whose
+ * four components are all at full resolution, eight bytes per pixel. Padding each component's
+ * blocks to whole sampling units adds at most 32 pixels to each dimension, under 1% within the
+ * image limits, which the extra 1% covers.
  */
-enum { DECODE_PIXEL_BUDGET = 2 * IMAGE_PIXEL_COUNT_MAX };
+#define DECODE_LEN_MAX ((ptrdiff_t)IMAGE_PIXEL_COUNT_MAX * (IMAGE_CHANNEL_COUNT + 8) / 100 * 101)
 
-// A job reserves its whole pixel count before decoding, so one image larger than the budget would
-// wait forever.
-_Static_assert((int)DECODE_PIXEL_BUDGET >= (int)IMAGE_PIXEL_COUNT_MAX,
-               "a maximum-size image must fit the decode budget alone");
+/**
+ * Largest total of decode and derivative-write memory, in bytes, that derivative jobs hold at once,
+ * across every worker.
+ *
+ * A job holds this memory from the start of its decode to the end of its last derivative write,
+ * and it grows with the dimensions the source declares rather than with its file size: a JPEG of a
+ * few hundred bytes can declare `IMAGE_PIXEL_COUNT_MAX` pixels. One job per worker would multiply
+ * that by the core count. At least two of the largest decodes fit, whatever the worker count, and
+ * smaller sources share the budget accordingly. The decoded pixels decision in `ARCHITECTURE.md`
+ * gives the measured peaks.
+ */
+#define DECODE_BUDGET_LEN (2 * DECODE_LEN_MAX)
 
-/** Pixel reservations shared by every derivative worker in the process. */
+/**
+ * How many times each dimension of a derivative its source region is, at least, after a scaled
+ * decode. Reducing straight to a derivative's size leaves the DCT's box-like reduction all of the
+ * work, which visibly softens it.
+ */
+enum { DECODE_SCALE_HEADROOM = 2 };
+
+/** Decode-memory reservations shared by every derivative worker in the process. */
 struct DecodeBudget {
-  /** Guards `pixel_count_reserved`. */
+  /** Guards `len_reserved`. */
   pthread_mutex_t mutex;
 
   /** Signalled whenever a job returns its reservation. */
   pthread_cond_t released;
 
-  /** Pixels currently reserved by jobs holding a decoded source, at most `DECODE_PIXEL_BUDGET`. */
-  ptrdiff_t pixel_count_reserved;
+  /** Bytes currently reserved by jobs holding a decode, at most `DECODE_BUDGET_LEN`. */
+  ptrdiff_t len_reserved;
 };
 
 static struct DecodeBudget decode_budget = {
     .mutex = PTHREAD_MUTEX_INITIALIZER,
     .released = PTHREAD_COND_INITIALIZER,
-    .pixel_count_reserved = 0,
+    .len_reserved = 0,
 };
 
 /** Worker context shared by all derivative jobs. Every field is read-only to a job. */
@@ -87,7 +93,7 @@ struct DerivativeContext {
  * This is the `JobFn` of the derivative phase, so it runs concurrently with other indexes and
  * writes only the outputs belonging to `index` and its own frame slot. A video's extracted frame is
  * removed before returning on every path. Everything the job allocates goes into a copy of its
- * worker's scratch, except the decoded pixels, which stay on `malloc` under the decode budget.
+ * worker's scratch, except the decode's memory, which stays on `malloc` under the decode budget.
  *
  * @param index    Media index this job handles. Must be below the media count.
  * @param arenas   Arenas of the worker running the job. Must not be `NULL`.
@@ -138,8 +144,10 @@ static int render_derivatives_outputs_inspect(struct Str source_path,
 /**
  * @brief Reads, decodes, and orients one item's source, then writes each of its stale derivatives.
  *
- * The decode runs under a `decode_budget` reservation for the source's pixel count, held until the
- * decoded image is released.
+ * The source is decoded at the smallest scale its stale derivatives allow. The job runs under a
+ * `decode_budget` reservation for the most it holds at once: while it decodes and orients the
+ * source, as `image_decode_len` counts it, or while it writes its largest stale derivative beside
+ * the oriented source. The reservation is kept until the decoded image is released.
  *
  * @param context  Shared derivative-phase state. Must not be `NULL`.
  * @param index    Media index whose derivatives are written.
@@ -156,30 +164,29 @@ static int render_derivatives_images(const struct DerivativeContext* context,
                                      struct Log* log) __attribute__((nonnull(1, 3, 5)));
 
 /**
- * @brief Decodes a JPEG source and applies its orientation.
+ * @brief Decodes a JPEG source at a scale and applies its orientation.
  *
- * An image source is oriented by its EXIF tag. A video frame is already upright, because it was
- * extracted auto-rotated. Once the orientation is read, the pixels hold all the derivatives need,
- * so a source of `JOB_SOURCE_DISCARD_LEN_MIN` or more gives its pages back before `image_orient`,
- * which may hold two full-size buffers.
+ * Once decoded, the pixels hold all the derivatives need, so a source of
+ * `JOB_SOURCE_DISCARD_LEN_MIN` or more gives its pages back before `image_orient`, which may hold
+ * two buffers of the decoded size.
  *
- * @param context                Shared derivative-phase state. Must not be `NULL`.
- * @param index                  Media index whose source is decoded.
- * @param derivative_source_path Path the JPEG bytes were read from, for diagnostics.
  * @param data                   JPEG bytes of the source image or video frame.
+ * @param scale_eighths          Decode scale, from 1 through `IMAGE_SCALE_FULL`.
+ * @param orientation            Orientation to apply to the decoded pixels.
  * @param scratch                Arena `data` was read into. Must not be `NULL`.
  * @param image_out              Receives the oriented image, which the caller releases with
  *                               `image_free` on success and failure alike. Must not be `NULL`.
+ * @param derivative_source_path Path the JPEG bytes were read from, for diagnostics.
  * @param log                    Log of the job, which receives the failure. Must not be `NULL`.
  * @return `0` on success, or `-1` after recording a decode failure.
  */
-static int decode_oriented(const struct DerivativeContext* context,
-                           ptrdiff_t index,
-                           struct Str derivative_source_path,
-                           struct Str data,
+static int decode_oriented(struct Str data,
+                           ptrdiff_t scale_eighths,
+                           enum ImageOrientation orientation,
                            const struct Arena* scratch,
                            struct Image* image_out,
-                           struct Log* log) __attribute__((nonnull(1, 5, 6, 7)));
+                           struct Str derivative_source_path,
+                           struct Log* log) __attribute__((nonnull(4, 5, 7)));
 
 /**
  * @brief Writes every stale derivative of one item from its oriented source.
@@ -190,7 +197,7 @@ static int decode_oriented(const struct DerivativeContext* context,
  * @param index    Media index whose derivatives are written.
  * @param is_stale One flag per derivative of the item, `true` where the output must be rewritten.
  *                 Must not be `NULL`.
- * @param oriented Oriented full-size source image. Must not be `NULL`.
+ * @param oriented Oriented source image, at its decoded scale. Must not be `NULL`.
  * @param scratch  Arena for each failure message's operation.
  * @param log      Log of the job, which receives every failure. Must not be `NULL`.
  * @return `0` when every stale derivative was written, or `-1` after recording a failure.
@@ -203,19 +210,40 @@ static int write_stale_derivatives(const struct DerivativeContext* context,
                                    struct Log* log) __attribute__((nonnull(1, 3, 4, 6)));
 
 /**
- * @brief Waits until `pixel_count` more decoded pixels fit `DECODE_PIXEL_BUDGET`, then reserves
- *        them.
+ * @brief Selects the part of a source that a derivative is resized from.
  *
- * @param pixel_count Pixels to reserve, at most `IMAGE_PIXEL_COUNT_MAX`.
+ * That is the whole source, or for a cropped derivative the largest centered rectangle of the
+ * derivative's aspect ratio.
+ *
+ * @param config_derivative Configured derivative. Must not be `NULL`.
+ * @param width_px          Source width in pixels.
+ * @param height_px         Source height in pixels.
+ * @param x_out             Receives the region's left edge. Must not be `NULL`.
+ * @param y_out             Receives the region's top edge. Must not be `NULL`.
+ * @param width_out         Receives the region's width. Must not be `NULL`.
+ * @param height_out        Receives the region's height. Must not be `NULL`.
  */
-static void reserve_decode_pixels(ptrdiff_t pixel_count);
+static void derivative_source_region(const struct GalleryDerivative* config_derivative,
+                                     ptrdiff_t width_px,
+                                     ptrdiff_t height_px,
+                                     ptrdiff_t* x_out,
+                                     ptrdiff_t* y_out,
+                                     ptrdiff_t* width_out,
+                                     ptrdiff_t* height_out) __attribute__((nonnull(1, 4, 5, 6, 7)));
 
 /**
- * @brief Returns a reservation made by `reserve_decode_pixels` and wakes any waiting job.
+ * @brief Waits until `len` more bytes of decode memory fit `DECODE_BUDGET_LEN`, then reserves them.
  *
- * @param pixel_count Pixels to return, equal to the earlier reservation.
+ * @param len Bytes to reserve, at most `DECODE_BUDGET_LEN`.
  */
-static void release_decode_pixels(ptrdiff_t pixel_count);
+static void reserve_decode_len(ptrdiff_t len);
+
+/**
+ * @brief Returns a reservation made by `reserve_decode_len` and wakes any waiting job.
+ *
+ * @param len Bytes to return, equal to the earlier reservation.
+ */
+static void release_decode_len(ptrdiff_t len);
 
 /**
  * @brief Reports whether a derivative output exists, is non-empty, and is no older than its source.
@@ -266,7 +294,7 @@ static bool is_at_least_as_new(const struct OsStat* candidate, const struct OsSt
  * `scratch` and then written whole in one `os_write`, so an encode failure writes nothing. The
  * resized image is released before returning, on success and on failure alike.
  *
- * @param oriented         Oriented full-size source image. Must not be `NULL`.
+ * @param oriented         Oriented source image, at its decoded scale. Must not be `NULL`.
  * @param source_x_px      Left edge of the source region, in oriented pixels.
  * @param source_y_px      Top edge of the source region, in oriented pixels.
  * @param source_width_px  Width of the source region. Must be positive and inside `oriented`.
@@ -313,6 +341,40 @@ int derivative_renderer_generate(const struct GalleryConfig* gallery_config,
   };
   return job_run(media_count, worker_count, worker_arenas, render_derivatives_job, &context,
                  S("generating derivatives"), (struct Str){0}, is_verbose, os, scratch, log);
+}
+
+ptrdiff_t derivative_renderer_decode_scale(const struct GalleryConfig* gallery_config,
+                                           const struct MediaItem* item,
+                                           const bool* is_stale,
+                                           ptrdiff_t width_px,
+                                           ptrdiff_t height_px,
+                                           enum ImageOrientation orientation) {
+  for (ptrdiff_t scale_eighths = 1; scale_eighths < IMAGE_SCALE_FULL; scale_eighths++) {
+    ptrdiff_t width_stored = 0;
+    ptrdiff_t height_stored = 0;
+    image_scale_size(width_px, height_px, scale_eighths, &width_stored, &height_stored);
+    ptrdiff_t width = 0;
+    ptrdiff_t height = 0;
+    image_orient_size(orientation, width_stored, height_stored, &width, &height);
+    bool is_enough = true;
+    for (ptrdiff_t i = 0; i < item->derivative_count && is_enough; i++) {
+      if (!is_stale[i]) {
+        continue;
+      }
+      ptrdiff_t region_x = 0;
+      ptrdiff_t region_y = 0;
+      ptrdiff_t region_width = 0;
+      ptrdiff_t region_height = 0;
+      derivative_source_region(&gallery_config->derivatives[i], width, height, &region_x, &region_y,
+                               &region_width, &region_height);
+      is_enough = region_width >= DECODE_SCALE_HEADROOM * item->derivatives[i].width_px &&
+                  region_height >= DECODE_SCALE_HEADROOM * item->derivatives[i].height_px;
+    }
+    if (is_enough) {
+      return scale_eighths;
+    }
+  }
+  return IMAGE_SCALE_FULL;
 }
 
 static int render_derivatives_job(ptrdiff_t index,
@@ -395,45 +457,66 @@ static int render_derivatives_images(const struct DerivativeContext* context,
               S("failed to read derivative source"), log) != 0) {
     return -1;
   }
-  ptrdiff_t source_width = 0;
-  ptrdiff_t source_height = 0;
-  if (image_probe(data, &source_width, &source_height, S("failed to decode derivative source"),
-                  derivative_source_path, log) != 0) {
+  struct ImageHeader header;
+  if (image_probe(data, &header, S("failed to decode derivative source"), derivative_source_path,
+                  log) != 0) {
     return -1;
   }
 
-  // The reservation uses the dimensions of the bytes about to be decoded, not the ones the probe
-  // phase recorded, so a source replaced since then cannot reserve less than it decodes.
-  // `image_decode` rejects bytes whose decoded dimensions differ from these.
-  const ptrdiff_t pixel_count = source_width * source_height;
-  reserve_decode_pixels(pixel_count);
+  // An image source is oriented by its EXIF tag. A video frame is already upright, because it was
+  // extracted auto-rotated.
+  const enum ImageOrientation orientation =
+      item->kind == MEDIA_KIND_IMAGE ? exif_read_orientation(data) : IMAGE_ORIENTATION_TOP_LEFT;
+  const ptrdiff_t scale_eighths = derivative_renderer_decode_scale(
+      context->gallery_config, item, is_stale, header.width_px, header.height_px, orientation);
+  // The reservation uses the header of the bytes about to be decoded, not the dimensions the probe
+  // phase recorded, so a source replaced since then cannot reserve less than it decodes. A
+  // reservation above the budget would wait forever, so it is capped, and that job runs alone.
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
+  image_scale_size(header.width_px, header.height_px, scale_eighths, &width, &height);
+  ptrdiff_t derivative_pixel_count_max = 0;
+  for (ptrdiff_t i = 0; i < item->derivative_count; i++) {
+    const ptrdiff_t pixel_count = item->derivatives[i].width_px * item->derivatives[i].height_px;
+    if (is_stale[i] && pixel_count > derivative_pixel_count_max) {
+      derivative_pixel_count_max = pixel_count;
+    }
+  }
+  const ptrdiff_t write_len =
+      width * height * IMAGE_CHANNEL_COUNT + derivative_pixel_count_max * IMAGE_ENCODE_LEN_PER_PX;
+  ptrdiff_t decode_len = image_decode_len(&header, scale_eighths, orientation);
+  if (write_len > decode_len) {
+    decode_len = write_len;
+  }
+  if (decode_len > DECODE_BUDGET_LEN) {
+    decode_len = DECODE_BUDGET_LEN;
+  }
+  reserve_decode_len(decode_len);
   struct Image image = {0};
-  int rc = decode_oriented(context, index, derivative_source_path, data, &scratch, &image, log);
+  int rc = decode_oriented(data, scale_eighths, orientation, &scratch, &image,
+                           derivative_source_path, log);
   if (rc == 0) {
     rc = write_stale_derivatives(context, index, is_stale, &image, scratch, log);
   }
   image_free(&image);
-  release_decode_pixels(pixel_count);
+  release_decode_len(decode_len);
   return rc;
 }
 
-static int decode_oriented(const struct DerivativeContext* context,
-                           ptrdiff_t index,
-                           struct Str derivative_source_path,
-                           struct Str data,
+static int decode_oriented(struct Str data,
+                           ptrdiff_t scale_eighths,
+                           enum ImageOrientation orientation,
                            const struct Arena* scratch,
                            struct Image* image_out,
+                           struct Str derivative_source_path,
                            struct Log* log) {
-  if (image_decode(data, image_out, S("failed to decode derivative source"), derivative_source_path,
-                   log) != 0) {
+  if (image_decode(data, scale_eighths, image_out, S("failed to decode derivative source"),
+                   derivative_source_path, log) != 0) {
     return -1;
   }
-  const enum ImageOrientation orientation = context->media[index]->kind == MEDIA_KIND_IMAGE
-                                                ? exif_read_orientation(data)
-                                                : IMAGE_ORIENTATION_TOP_LEFT;
-  // The orientation was the last read of the source. The worker's scratch outlives the job, so a
-  // large source's pages would otherwise stay resident beside other workers' decodes and beside a
-  // rotated image's second buffer.
+  // The decode was the last read of the source. The worker's scratch outlives the job, so a large
+  // source's pages would otherwise stay resident beside other workers' decodes and beside a rotated
+  // image's second buffer.
   if (data.len >= JOB_SOURCE_DISCARD_LEN_MIN) {
     arena_discard(scratch, data.data, data.len);
   }
@@ -447,12 +530,11 @@ static int write_stale_derivatives(const struct DerivativeContext* context,
                                    const struct Image* oriented,
                                    struct Arena scratch,
                                    struct Log* log) {
-  // Peak memory per job is the decode, described at `DECODE_PIXEL_BUDGET`, or for a rotated or
-  // mirrored source the two full-size buffers `image_orient` briefly holds, after a source of
-  // `JOB_SOURCE_DISCARD_LEN_MIN` or more was given back. After it the job holds the oriented source
-  // and one resized image. An upright source is oriented in place. The resizer adds at most three
-  // padding bytes per row for aligned stb stores. The encoded JPEG is held in the job's scratch
-  // until its one write.
+  // Peak memory per job is the larger of the decode and orientation, as `image_decode_len` counts
+  // them, after a source of `JOB_SOURCE_DISCARD_LEN_MIN` or more was given back, and the largest
+  // derivative's resize and encode beside the oriented source, as `IMAGE_ENCODE_LEN_PER_PX` counts
+  // them. An upright source is oriented in place. The resizer adds at most three padding bytes per
+  // row for aligned stb stores. The encoded JPEG is held in the job's scratch until its one write.
   const struct MediaItem* item = context->media[index];
   int rc = 0;
   for (ptrdiff_t i = 0; i < item->derivative_count; i++) {
@@ -463,12 +545,10 @@ static int write_stale_derivatives(const struct DerivativeContext* context,
     const struct GalleryDerivative* config_derivative = &context->gallery_config->derivatives[i];
     ptrdiff_t crop_x = 0;
     ptrdiff_t crop_y = 0;
-    ptrdiff_t crop_width = oriented->width_px;
-    ptrdiff_t crop_height = oriented->height_px;
-    if (config_derivative->is_crop) {
-      image_center_crop(oriented->width_px, oriented->height_px, config_derivative->width_px,
-                        config_derivative->height_px, &crop_x, &crop_y, &crop_width, &crop_height);
-    }
+    ptrdiff_t crop_width = 0;
+    ptrdiff_t crop_height = 0;
+    derivative_source_region(config_derivative, oriented->width_px, oriented->height_px, &crop_x,
+                             &crop_y, &crop_width, &crop_height);
     // Each derivative's operation lives in a copy of `scratch`, which the next one reuses.
     struct Arena operation_scratch = scratch;
     struct Buf operation = {.arena = &operation_scratch};
@@ -482,18 +562,35 @@ static int write_stale_derivatives(const struct DerivativeContext* context,
   return rc;
 }
 
-static void reserve_decode_pixels(ptrdiff_t pixel_count) {
+static void derivative_source_region(const struct GalleryDerivative* config_derivative,
+                                     ptrdiff_t width_px,
+                                     ptrdiff_t height_px,
+                                     ptrdiff_t* x_out,
+                                     ptrdiff_t* y_out,
+                                     ptrdiff_t* width_out,
+                                     ptrdiff_t* height_out) {
+  *x_out = 0;
+  *y_out = 0;
+  *width_out = width_px;
+  *height_out = height_px;
+  if (config_derivative->is_crop) {
+    image_center_crop(width_px, height_px, config_derivative->width_px,
+                      config_derivative->height_px, x_out, y_out, width_out, height_out);
+  }
+}
+
+static void reserve_decode_len(ptrdiff_t len) {
   (void)pthread_mutex_lock(&decode_budget.mutex);
-  while (decode_budget.pixel_count_reserved > DECODE_PIXEL_BUDGET - pixel_count) {
+  while (decode_budget.len_reserved > DECODE_BUDGET_LEN - len) {
     (void)pthread_cond_wait(&decode_budget.released, &decode_budget.mutex);
   }
-  decode_budget.pixel_count_reserved += pixel_count;
+  decode_budget.len_reserved += len;
   (void)pthread_mutex_unlock(&decode_budget.mutex);
 }
 
-static void release_decode_pixels(ptrdiff_t pixel_count) {
+static void release_decode_len(ptrdiff_t len) {
   (void)pthread_mutex_lock(&decode_budget.mutex);
-  decode_budget.pixel_count_reserved -= pixel_count;
+  decode_budget.len_reserved -= len;
   (void)pthread_cond_broadcast(&decode_budget.released);
   (void)pthread_mutex_unlock(&decode_budget.mutex);
 }

@@ -112,6 +112,8 @@ set(fram_owned_sources
     "${PROJECT_SOURCE_DIR}/src/runtime/walk.h"
     "${PROJECT_SOURCE_DIR}/tests/os_memory.c"
     "${PROJECT_SOURCE_DIR}/tests/os_memory.h"
+    "${PROJECT_SOURCE_DIR}/tests/test_jpeg_fixture.c"
+    "${PROJECT_SOURCE_DIR}/tests/test_jpeg_fixture.h"
     "${PROJECT_SOURCE_DIR}/tests/test_random.c"
     "${PROJECT_SOURCE_DIR}/tests/test_support.c"
     "${PROJECT_SOURCE_DIR}/tests/test_support.h"

@@ -408,15 +408,16 @@ struct BaseJpeg {
   /** Offset of the frame header's marker. */
   ptrdiff_t frame_start;
 
-  /** Offset one past the frame header, where the probe stops reading. */
+  /** Offset one past the frame header, whose fields the probe checks against the image limits. */
   ptrdiff_t header_len;
 };
 
 /**
  * @brief Encodes a small JPEG of random pixels and finds its frame header.
  *
- * The probe reads up to the end of the frame header and nothing after it. The encoder writes the
- * tables before it, so the header is short and its last segment is the frame header.
+ * The probe reads every segment up to the first scan, and the frame header is the one whose
+ * fields it checks against the image limits. Overwrites land only up to the end of the frame
+ * header. The Huffman tables and the scan header after it are only ever cut short.
  *
  * @param rng      Generator to draw from. Must not be `NULL`.
  * @param arena    Arena that owns the bytes. Must not be `NULL`.
@@ -495,9 +496,10 @@ static void test_image_probe_survives_mutated_headers(void) {
     const struct Str jpeg = str_clone(buf_str(&bytes), &arena);
 
     struct Log log = {.buf = {.arena = &log_arena}};
-    ptrdiff_t width = 0;
-    ptrdiff_t height = 0;
-    const int rc = image_probe(jpeg, &width, &height, S("failed to probe"), SOURCE_PATH, &log);
+    struct ImageHeader header = {0};
+    const int rc = image_probe(jpeg, &header, S("failed to probe"), SOURCE_PATH, &log);
+    const ptrdiff_t width = header.width_px;
+    const ptrdiff_t height = header.height_px;
     bool is_ok = is_log_consistent(&log, rc) && is_log_attributed(&log, SOURCE_PATH, arena);
     if (rc == 0) {
       is_ok = is_ok && width >= 1 && width <= IMAGE_DIMENSION_MAX && height >= 1 &&

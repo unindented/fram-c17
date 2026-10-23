@@ -11,12 +11,13 @@
 #include "shared/buf.h"
 #include "shared/log.h"
 #include "shared/str.h"
+#include "test_jpeg_fixture.h"
 #include "test_support.h"
 
 // A sanitizer's allocator ends the process itself when an allocation fails, so the decode that runs
-// out of memory cannot reach the stb hooks under one. GCC defines `__SANITIZE_*__`, and Apple Clang
-// answers `__has_feature` instead. cppcheck fails on `__has_feature` where it does not exist, so
-// the test is hidden from it.
+// out of memory cannot reach libjpeg-turbo's out-of-memory error under one. GCC defines
+// `__SANITIZE_*__`, and Apple Clang answers `__has_feature` instead. cppcheck fails on
+// `__has_feature` where it does not exist, so the test is hidden from it.
 #if defined(__SANITIZE_ADDRESS__) || defined(__SANITIZE_THREAD__)
 #define TEST_IS_SANITIZED 1
 #elif defined(__has_feature) && !defined(__CPPCHECK__)
@@ -51,6 +52,16 @@ static int encode_fixture(const struct Image* image, struct Arena* arena, struct
     __attribute__((nonnull(1, 2, 3)));
 
 /**
+ * @brief Checks that an image holds one RGB color, within a tolerance, in every pixel.
+ *
+ * @param image     Image to check. Must not be `NULL`.
+ * @param color     Expected RGB color. Must not be `NULL`.
+ * @param tolerance Largest difference accepted in any channel.
+ */
+static void check_solid(const struct Image* image, const unsigned char* color, int tolerance)
+    __attribute__((nonnull(1, 2)));
+
+/**
  * @brief Checks one exact orientation of the asymmetric fixture.
  *
  * @param orientation     Orientation to apply.
@@ -79,7 +90,7 @@ static void realloc_beyond_object_len(void* userdata);
 
 #ifdef TEST_HAS_ADDRESS_LIMIT
 /**
- * @brief Decodes a JPEG under an address-space limit that leaves no room for its pixels.
+ * @brief Decodes a JPEG under an address-space limit that leaves no room for its full-size buffers.
  *
  * The limit leaves 8 MiB above what the process maps already, so the decoder's first full-size
  * buffer cannot be allocated.
@@ -99,6 +110,16 @@ static int encode_fixture(const struct Image* image, struct Arena* arena, struct
     return -1;
   }
   return 0;
+}
+
+static void check_solid(const struct Image* image, const unsigned char* color, int tolerance) {
+  int difference_max = 0;
+  for (ptrdiff_t i = 0; i < image->width_px * image->height_px * IMAGE_CHANNEL_COUNT; i++) {
+    const int difference = abs((int)image->pixels[i] - (int)color[i % IMAGE_CHANNEL_COUNT]);
+    difference_max = difference > difference_max ? difference : difference_max;
+  }
+  TEST_CHECK_(difference_max <= tolerance, "every channel is within %d of the color", tolerance);
+  TEST_MSG("largest difference: %d", difference_max);
 }
 
 static void check_orientation(enum ImageOrientation orientation,
@@ -152,7 +173,8 @@ static void decode_under_address_limit(void* userdata) {
     return;
   }
   struct Image image = {0};
-  (void)image_decode(input->data, &image, S("failed to decode"), S("a.jpg"), &log);
+  (void)image_decode(input->data, IMAGE_SCALE_FULL, &image, S("failed to decode"), S("a.jpg"),
+                     &log);
 }
 #endif
 
@@ -206,15 +228,16 @@ static void test_image_encode_probe_and_decode(void) {
   TEST_CHECK(str_startswith(encoded, S("\xFF\xD8")));
   TEST_CHECK(str_endswith(encoded, S("\xFF\xD9")));
 
-  ptrdiff_t width = 0;
-  ptrdiff_t height = 0;
+  struct ImageHeader header;
   struct Log log = test_log();
-  TEST_CHECK(image_probe(encoded, &width, &height, S("failed to probe"), S("a.jpg"), &log) == 0);
-  TEST_CHECK(width == 3);
-  TEST_CHECK(height == 2);
+  TEST_CHECK(image_probe(encoded, &header, S("failed to probe"), S("a.jpg"), &log) == 0);
+  TEST_CHECK(header.width_px == 3);
+  TEST_CHECK(header.height_px == 2);
+  TEST_CHECK(header.coefficient_len == 0);
 
   struct Image decoded = {0};
-  TEST_ASSERT(image_decode(encoded, &decoded, S("failed to decode"), S("a.jpg"), &log) == 0);
+  TEST_ASSERT(image_decode(encoded, IMAGE_SCALE_FULL, &decoded, S("failed to decode"), S("a.jpg"),
+                           &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
   TEST_CHECK(decoded.width_px == 3);
   TEST_CHECK(decoded.height_px == 2);
@@ -249,16 +272,166 @@ static void test_image_encode_is_deterministic_in_perm(void) {
   TEST_CHECK(str_eq(first, second));
 }
 
+// Each scale decodes in the DCT to the dimensions `image_scale_size` gives, rounded up, with the
+// colors of the full-size image.
+static void test_image_decode_scales_in_the_dct(void) {
+  static const unsigned char color[] = {20, 100, 220};
+  struct Arena arena = test_arena();
+  struct Str encoded = {0};
+  if (!TEST_CHECK(test_jpeg_encode_solid(61, 37, color, TEST_JPEG_BASELINE, &arena, &encoded) ==
+                  0)) {
+    return;
+  }
+  static const ptrdiff_t widths[] = {0, 8, 16, 23, 31, 39, 46, 54, 61};
+  static const ptrdiff_t heights[] = {0, 5, 10, 14, 19, 24, 28, 33, 37};
+  for (ptrdiff_t scale_eighths = 1; scale_eighths <= IMAGE_SCALE_FULL; scale_eighths++) {
+    ptrdiff_t width = 0;
+    ptrdiff_t height = 0;
+    image_scale_size(61, 37, scale_eighths, &width, &height);
+    TEST_CHECK_(width == widths[scale_eighths] && height == heights[scale_eighths],
+                "%td/8 scales 61 x 37 to %td x %td", scale_eighths, width, height);
+
+    struct Image decoded = {0};
+    struct Log log = test_log();
+    TEST_ASSERT(image_decode(encoded, scale_eighths, &decoded, S("failed to decode"), S("a.jpg"),
+                             &log) == 0);
+    TEST_CHECK(test_log_is_empty(&log));
+    TEST_CHECK_(decoded.width_px == width && decoded.height_px == height,
+                "%td/8 decodes to %td x %td", scale_eighths, decoded.width_px, decoded.height_px);
+    check_solid(&decoded, color, 4);
+    image_free(&decoded);
+  }
+}
+
+// A CMYK or YCCK JPEG decodes to RGB, each color multiplied by black.
+static void test_image_decode_converts_cmyk_and_ycck(void) {
+  static const unsigned char color[] = {20, 100, 220};
+  static const enum TestJpegKind kinds[] = {TEST_JPEG_CMYK, TEST_JPEG_YCCK};
+  for (ptrdiff_t i = 0; i < (ptrdiff_t)(sizeof(kinds) / sizeof(kinds[0])); i++) {
+    struct Arena arena = test_arena();
+    struct Str encoded = {0};
+    if (!TEST_CHECK(test_jpeg_encode_solid(16, 16, color, kinds[i], &arena, &encoded) == 0)) {
+      return;
+    }
+    struct Image decoded = {0};
+    struct Log log = test_log();
+    TEST_ASSERT(image_decode(encoded, IMAGE_SCALE_FULL, &decoded, S("failed to decode"), S("a.jpg"),
+                             &log) == 0);
+    TEST_CHECK(test_log_is_empty(&log));
+    TEST_CHECK(decoded.width_px == 16 && decoded.height_px == 16);
+    check_solid(&decoded, color, 6);
+    image_free(&decoded);
+  }
+}
+
+// A progressive JPEG reports the coefficients a decode buffers for every block of every component:
+// a 64 x 48 image with 2 x 2 subsampled chroma has 8 x 6 luma blocks and 4 x 3 blocks for each
+// chroma component, 72 blocks of 128 bytes. At 65 x 49 the luma's 9 x 7 blocks are padded to whole
+// 2 x 2 sampling units, 10 x 8, beside 5 x 4 for each chroma component, 120 blocks. A progressive
+// decode at a reduced scale still decodes.
+static void test_image_probe_reports_multi_scan_coefficients(void) {
+  static const unsigned char color[] = {200, 40, 90};
+  struct Arena arena = test_arena();
+  struct Str encoded = {0};
+  if (!TEST_CHECK(test_jpeg_encode_solid(64, 48, color, TEST_JPEG_PROGRESSIVE, &arena, &encoded) ==
+                  0)) {
+    return;
+  }
+  struct ImageHeader header;
+  struct Log log = test_log();
+  TEST_ASSERT(image_probe(encoded, &header, S("failed to probe"), S("a.jpg"), &log) == 0);
+  TEST_CHECK(header.width_px == 64 && header.height_px == 48);
+  TEST_CHECK(header.coefficient_len == 72 * 128);
+
+  struct Str padded = {0};
+  if (!TEST_CHECK(test_jpeg_encode_solid(65, 49, color, TEST_JPEG_PROGRESSIVE, &arena, &padded) ==
+                  0)) {
+    return;
+  }
+  struct ImageHeader padded_header;
+  TEST_ASSERT(image_probe(padded, &padded_header, S("failed to probe"), S("a.jpg"), &log) == 0);
+  TEST_CHECK(padded_header.coefficient_len == 120 * 128);
+
+  struct Image decoded = {0};
+  TEST_ASSERT(image_decode(encoded, 2, &decoded, S("failed to decode"), S("a.jpg"), &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(decoded.width_px == 16 && decoded.height_px == 12);
+  check_solid(&decoded, color, 4);
+  image_free(&decoded);
+}
+
+// Damaged bytes after the last row leave every row decoded: here the end marker is replaced by the
+// start of another image, which the decoder never reads.
+static void test_image_decode_ignores_bytes_after_last_row(void) {
+  static const unsigned char color[] = {20, 100, 220};
+  struct Arena arena = test_arena();
+  struct Str encoded = {0};
+  if (!TEST_CHECK(test_jpeg_encode_solid(64, 48, color, TEST_JPEG_BASELINE, &arena, &encoded) ==
+                  0)) {
+    return;
+  }
+  TEST_ASSERT(str_endswith(encoded, S("\xFF\xD9")));
+  const struct Str damaged = str_concat(str_head(encoded, encoded.len - 2), S("\xFF\xD8"), &arena);
+
+  struct Image decoded = {0};
+  struct Log log = test_log();
+  TEST_ASSERT(image_decode(damaged, IMAGE_SCALE_FULL, &decoded, S("failed to decode"), S("a.jpg"),
+                           &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(decoded.width_px == 64 && decoded.height_px == 48);
+  check_solid(&decoded, color, 3);
+  image_free(&decoded);
+}
+
+// A JPEG that repeats its last scan past 100 scans probes, because the probe reads no scan, and
+// fails to decode before it spends the time the scans would take.
+static void test_image_decode_rejects_excess_scans(void) {
+  static const unsigned char color[] = {20, 100, 220};
+  struct Arena arena = test_arena();
+  struct Str encoded = {0};
+  if (!TEST_CHECK(test_jpeg_encode_solid(16, 16, color, TEST_JPEG_PROGRESSIVE, &arena, &encoded) ==
+                  0)) {
+    return;
+  }
+  ptrdiff_t last_scan = -1;
+  for (ptrdiff_t i = 0; i + 1 < encoded.len; i++) {
+    if ((unsigned char)encoded.data[i] == 0xFF && (unsigned char)encoded.data[i + 1] == 0xDA) {
+      last_scan = i;
+    }
+  }
+  TEST_ASSERT(last_scan > 0);
+  const struct Str scan = str_head(str_tail(encoded, last_scan), encoded.len - 2 - last_scan);
+  struct Buf repeated = {.arena = &arena};
+  buf_append(&repeated, str_head(encoded, encoded.len - 2));
+  for (ptrdiff_t i = 0; i < 100; i++) {
+    buf_append(&repeated, scan);
+  }
+  buf_append(&repeated, S("\xFF\xD9"));
+
+  struct ImageHeader header;
+  struct Log probe_log = test_log();
+  TEST_CHECK(
+      image_probe(buf_str(&repeated), &header, S("failed to probe"), S("a.jpg"), &probe_log) == 0);
+  struct Image decoded = {0};
+  struct Log decode_log = test_log();
+  TEST_CHECK(image_decode(buf_str(&repeated), IMAGE_SCALE_FULL, &decoded, S("failed to decode"),
+                          S("a.jpg"), &decode_log) == -1);
+  TEST_CHECK(test_log_is(&decode_log,
+                         "failed to decode: failed to decode JPEG: JPEG exceeds max scan count "
+                         "(100 scans) at 101 scans ('a.jpg')\n"));
+  TEST_CHECK(decoded.pixels == NULL);
+}
+
 // Probing rejects hostile dimensions before the decoder can allocate their full pixel buffer.
 static void test_image_probe_rejects_oversized_dimensions(void) {
   static const unsigned char jpeg[] = {
-      0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x01, 0x4E, 0x21, 0x03,
-      0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xFF, 0xD9,
+      0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x01, 0x4E, 0x21, 0x03, 0x01,
+      0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xFF, 0xDA, 0x00, 0x0C, 0x03,
+      0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00, 0xFF, 0xD9,
   };
-  ptrdiff_t width = 0;
-  ptrdiff_t height = 0;
+  struct ImageHeader header;
   struct Log probe_log = test_log();
-  TEST_CHECK(image_probe(str_from_bytes(jpeg, sizeof(jpeg)), &width, &height, S("failed to probe"),
+  TEST_CHECK(image_probe(str_from_bytes(jpeg, sizeof(jpeg)), &header, S("failed to probe"),
                          S("a.jpg"), &probe_log) == -1);
   TEST_CHECK(test_log_is(&probe_log,
                          "failed to probe: image exceeds max dimension (20000 pixels) at "
@@ -266,8 +439,8 @@ static void test_image_probe_rejects_oversized_dimensions(void) {
 
   struct Image decoded = {0};
   struct Log decode_log = test_log();
-  TEST_CHECK(image_decode(str_from_bytes(jpeg, sizeof(jpeg)), &decoded, S("failed to decode"),
-                          S("a.jpg"), &decode_log) == -1);
+  TEST_CHECK(image_decode(str_from_bytes(jpeg, sizeof(jpeg)), IMAGE_SCALE_FULL, &decoded,
+                          S("failed to decode"), S("a.jpg"), &decode_log) == -1);
   TEST_CHECK(test_log_is(&decode_log,
                          "failed to decode: image exceeds max dimension (20000 "
                          "pixels) at 20001 x 1 ('a.jpg')\n"));
@@ -278,58 +451,81 @@ static void test_image_probe_rejects_oversized_dimensions(void) {
 // rejected too, in the same limit shape: 20000 x 5001 is 100020000 pixels.
 static void test_image_probe_rejects_oversized_pixel_count(void) {
   static const unsigned char jpeg[] = {
-      0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x13, 0x89, 0x4E, 0x20, 0x03,
-      0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xFF, 0xD9,
+      0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x13, 0x89, 0x4E, 0x20, 0x03, 0x01,
+      0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xFF, 0xDA, 0x00, 0x0C, 0x03,
+      0x01, 0x00, 0x02, 0x11, 0x03, 0x11, 0x00, 0x3F, 0x00, 0xFF, 0xD9,
   };
-  ptrdiff_t width = 0;
-  ptrdiff_t height = 0;
+  struct ImageHeader header;
   struct Log log = test_log();
-  TEST_CHECK(image_probe(str_from_bytes(jpeg, sizeof(jpeg)), &width, &height, S("failed to probe"),
+  TEST_CHECK(image_probe(str_from_bytes(jpeg, sizeof(jpeg)), &header, S("failed to probe"),
                          S("a.jpg"), &log) == -1);
   TEST_CHECK(test_log_is(&log,
                          "failed to probe: image exceeds max pixel count (100000000 pixels) at "
                          "20000 x 5001 ('a.jpg')\n"));
 }
 
-// Probing and decoding reject an input longer than stb can index before reading any of it.
-static void test_image_probe_rejects_oversized_input(void) {
-  static const unsigned char jpeg[] = {0xFF, 0xD8};
-  const ptrdiff_t data_len = (ptrdiff_t)IMAGE_INPUT_LEN_MAX + 1;
-  ptrdiff_t width = 0;
-  ptrdiff_t height = 0;
-  struct Log probe_log = test_log();
-  TEST_CHECK(image_probe(str_from_bytes(jpeg, data_len), &width, &height, S("failed to probe"),
-                         S("a.jpg"), &probe_log) == -1);
-  TEST_CHECK(test_log_is(&probe_log,
-                         "failed to probe: JPEG input exceeds max JPEG input length (2147483647 "
-                         "bytes) at 2147483648 bytes ('a.jpg')\n"));
+// A header the decoder cannot decode is rejected by the probe, with the reason: 12-bit samples,
+// two components, which name no color space, and lossless coding, which cannot be scaled.
+static void test_image_probe_rejects_unsupported_headers(void) {
+  static const unsigned char twelve_bit[] = {
+      0xFF, 0xD8, 0xFF, 0xC1, 0x00, 0x0B, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11,
+      0x00, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, 0xFF, 0xD9,
+  };
+  static const unsigned char two_components[] = {
+      0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0E, 0x08, 0x00, 0x01, 0x00, 0x01,
+      0x02, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0xFF, 0xDA, 0x00, 0x0A,
+      0x02, 0x01, 0x00, 0x02, 0x00, 0x00, 0x3F, 0x00, 0xFF, 0xD9,
+  };
+  struct ImageHeader header;
+  struct Log precision_log = test_log();
+  TEST_CHECK(image_probe(str_from_bytes(twelve_bit, sizeof(twelve_bit)), &header,
+                         S("failed to probe"), S("a.jpg"), &precision_log) == -1);
+  TEST_CHECK(test_log_is(
+      &precision_log,
+      "failed to probe: failed to probe JPEG: Unsupported JPEG data precision 12 ('a.jpg')\n"));
 
+  struct Log component_log = test_log();
+  TEST_CHECK(image_probe(str_from_bytes(two_components, sizeof(two_components)), &header,
+                         S("failed to probe"), S("a.jpg"), &component_log) == -1);
+  TEST_CHECK(
+      test_log_is(&component_log,
+                  "failed to probe: failed to probe JPEG: Unsupported color conversion request "
+                  "('a.jpg')\n"));
+
+  static const unsigned char color[] = {20, 100, 220};
+  struct Arena arena = test_arena();
+  struct Str lossless = {0};
+  if (!TEST_CHECK(test_jpeg_encode_solid(16, 16, color, TEST_JPEG_LOSSLESS, &arena, &lossless) ==
+                  0)) {
+    return;
+  }
+  struct Log lossless_log = test_log();
+  TEST_CHECK(image_probe(lossless, &header, S("failed to probe"), S("a.jpg"), &lossless_log) == -1);
+  TEST_CHECK(test_log_is(
+      &lossless_log,
+      "failed to probe: failed to probe JPEG: lossless JPEG is unsupported ('a.jpg')\n"));
   struct Image decoded = {0};
   struct Log decode_log = test_log();
-  TEST_CHECK(image_decode(str_from_bytes(jpeg, data_len), &decoded, S("failed to decode"),
-                          S("a.jpg"), &decode_log) == -1);
-  TEST_CHECK(test_log_is(&decode_log,
-                         "failed to decode: JPEG input exceeds max JPEG input length (2147483647 "
-                         "bytes) at 2147483648 bytes ('a.jpg')\n"));
+  TEST_CHECK(image_decode(lossless, IMAGE_SCALE_FULL, &decoded, S("failed to decode"), S("a.jpg"),
+                          &decode_log) == -1);
+  TEST_CHECK(test_log_is(
+      &decode_log,
+      "failed to decode: failed to decode JPEG: lossless JPEG is unsupported ('a.jpg')\n"));
   TEST_CHECK(decoded.pixels == NULL);
 }
 
-// A decode that runs out of memory inside stb ends in `os_oom` through the allocator hooks in
-// `vendor/stb/stb.c`, rather than failing as an invalid JPEG. It needs an address-space limit the
-// system enforces, and an allocator that reports a failure, so it runs on Linux without sanitizers.
-static void test_image_decode_failure_inside_stb_ends_in_oom(void) {
+// A decode that runs out of memory inside the codec ends in `os_oom`, which `image_decode` calls
+// for libjpeg-turbo's out-of-memory error, rather than failing as an invalid JPEG. The fixture is
+// progressive, so the first allocation the limit refuses is one of the codec's own coefficient
+// buffers, about 27 MB in all, before any pixels. It needs an address-space limit the system
+// enforces, and an allocator that reports a failure, so it runs on Linux without sanitizers.
+static void test_image_decode_failure_inside_codec_ends_in_oom(void) {
 #ifdef TEST_HAS_ADDRESS_LIMIT
-  enum { FIXTURE_SIDE_PX = 3000 };
-  const ptrdiff_t pixel_len = (ptrdiff_t)FIXTURE_SIDE_PX * FIXTURE_SIDE_PX * IMAGE_CHANNEL_COUNT;
-  struct Image fixture = {.pixels = image_alloc((size_t)pixel_len),
-                          .width_px = FIXTURE_SIDE_PX,
-                          .height_px = FIXTURE_SIDE_PX};
-  memset(fixture.pixels, 0, (size_t)pixel_len);
+  static const unsigned char black[] = {0, 0, 0};
   struct Arena arena = test_arena();
   struct Str encoded = {0};
-  const int encode_rc = encode_fixture(&fixture, &arena, &encoded);
-  image_free(&fixture);
-  if (encode_rc != 0) {
+  if (!TEST_CHECK(test_jpeg_encode_solid(3000, 3000, black, TEST_JPEG_PROGRESSIVE, &arena,
+                                         &encoded) == 0)) {
     return;
   }
   struct DecodeInput input = {.data = encoded};
@@ -472,11 +668,17 @@ TEST_LIST = {
     {"image fit clamps to one pixel", test_image_fit_clamps_to_one_pixel},
     {"image encode probe and decode", test_image_encode_probe_and_decode},
     {"image encode is deterministic in perm", test_image_encode_is_deterministic_in_perm},
+    {"image decode scales in the dct", test_image_decode_scales_in_the_dct},
+    {"image decode converts cmyk and ycck", test_image_decode_converts_cmyk_and_ycck},
+    {"image probe reports multi scan coefficients",
+     test_image_probe_reports_multi_scan_coefficients},
+    {"image decode ignores bytes after last row", test_image_decode_ignores_bytes_after_last_row},
     {"image probe rejects oversized dimensions", test_image_probe_rejects_oversized_dimensions},
     {"image probe rejects oversized pixel count", test_image_probe_rejects_oversized_pixel_count},
-    {"image probe rejects oversized input", test_image_probe_rejects_oversized_input},
-    {"image decode failure inside stb ends in oom",
-     test_image_decode_failure_inside_stb_ends_in_oom},
+    {"image probe rejects unsupported headers", test_image_probe_rejects_unsupported_headers},
+    {"image decode rejects excess scans", test_image_decode_rejects_excess_scans},
+    {"image decode failure inside codec ends in oom",
+     test_image_decode_failure_inside_codec_ends_in_oom},
     {"image resize constant color", test_image_resize_constant_color},
     {"image center crop geometry", test_image_center_crop_geometry},
     {"image resize center region", test_image_resize_center_region},

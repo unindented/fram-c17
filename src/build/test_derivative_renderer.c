@@ -20,6 +20,7 @@
 #include "shared/buf.h"
 #include "shared/log.h"
 #include "shared/str.h"
+#include "test_jpeg_fixture.h"
 #include "test_support.h"
 
 // Every test here runs against the in-memory host: an image job reads its source and writes its
@@ -150,10 +151,15 @@ static int probe_file(struct Str path,
                       ptrdiff_t* height_out) {
   struct Str data = {0};
   struct Log log = test_log();
+  struct ImageHeader header;
   const int rc =
       os_read(os, path, TEST_FILE_LEN_MAX, &scratch, &data, S("failed to read output"), &log) == 0
-          ? image_probe(data, width_out, height_out, S("failed to probe output"), path, &log)
+          ? image_probe(data, &header, S("failed to probe output"), path, &log)
           : -1;
+  if (rc == 0) {
+    *width_out = header.width_px;
+    *height_out = header.height_px;
+  }
   const struct Str failure = buf_str(&log.buf);
   TEST_MSG("%.*s", STR_FMT(failure));
   return rc;
@@ -171,8 +177,8 @@ static bool is_same_mtime(const struct OsStat* a, const struct OsStat* b) {
 }
 
 /**
- * @brief Runs a derivative phase over fresh worker arenas, reading sources up to the decoder's own
- *        input limit.
+ * @brief Runs a derivative phase over fresh worker arenas, reading sources up to the media read
+ *        limit.
  *
  * @param gallery_config Configured derivatives shared by every job. Must not be `NULL`.
  * @param media          Media items, one job per item. Must not be `NULL`.
@@ -234,8 +240,8 @@ static void check_generate_applies_orientation(ptrdiff_t source_len) {
   TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
   struct Str output = {0};
   TEST_CHECK(os_memory_file(os, "public/l.jpg", &output) == 0);
-  TEST_CHECK(image_decode(output, &decoded, S("failed to decode output"), S("output.jpg"), &log) ==
-             0);
+  TEST_CHECK(image_decode(output, IMAGE_SCALE_FULL, &decoded, S("failed to decode output"),
+                          S("output.jpg"), &log) == 0);
   if (TEST_CHECK(decoded.width_px == 8 && decoded.height_px == 16)) {
     const ptrdiff_t top = (2 * decoded.width_px + 4) * IMAGE_CHANNEL_COUNT;
     const ptrdiff_t bottom = (13 * decoded.width_px + 4) * IMAGE_CHANNEL_COUNT;
@@ -294,6 +300,85 @@ static void test_generate_image_and_skip_fresh_outputs(void) {
              is_same_mtime(&after, &large_before));
   TEST_CHECK(os_stat(os, item.original_path, &after) == 0 &&
              is_same_mtime(&after, &original_before));
+}
+
+// A source many times its derivatives' size, which decodes at an eighth, still gives each
+// derivative its planned dimensions and the side of the source each color came from.
+static void test_generate_decodes_large_source_scaled(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct MediaItem item;
+  struct GalleryConfig config;
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 95);
+  struct MediaItem* media[] = {&item};
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  init_item(&item, MEDIA_KIND_IMAGE, "large.jpg", &arena);
+  enum { WIDTH = 128, HEIGHT = 64 };
+  struct Image source = {.pixels = image_alloc((size_t)WIDTH * HEIGHT * IMAGE_CHANNEL_COUNT),
+                         .width_px = WIDTH,
+                         .height_px = HEIGHT};
+  for (ptrdiff_t i = 0; i < WIDTH * HEIGHT; i++) {
+    const bool is_left = i % WIDTH < WIDTH / 2;
+    unsigned char* pixel = source.pixels + i * IMAGE_CHANNEL_COUNT;
+    pixel[0] = is_left ? 220 : 20;
+    pixel[1] = 60;
+    pixel[2] = is_left ? 20 : 220;
+  }
+  struct Str jpeg = {0};
+  const int encode_rc = test_jpeg_encode_image(&source, TEST_JPEG_BASELINE, 95, &arena, &jpeg);
+  image_free(&source);
+  if (!TEST_CHECK(encode_rc == 0)) {
+    return;
+  }
+  os_memory_write_bytes(os, item.source_path, jpeg);
+
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  ptrdiff_t width = 0;
+  ptrdiff_t height = 0;
+  TEST_CHECK(probe_file(item.derivatives[0].path, os, arena, &width, &height) == 0);
+  TEST_CHECK(width == 2 && height == 2);
+  struct Str output = {0};
+  struct Image decoded = {0};
+  TEST_CHECK(os_memory_file(os, "public/l.jpg", &output) == 0);
+  TEST_ASSERT(image_decode(output, IMAGE_SCALE_FULL, &decoded, S("failed to decode output"),
+                           S("output.jpg"), &log) == 0);
+  if (TEST_CHECK(decoded.width_px == 8 && decoded.height_px == 4)) {
+    const ptrdiff_t left = (2 * decoded.width_px + 1) * IMAGE_CHANNEL_COUNT;
+    const ptrdiff_t right = (2 * decoded.width_px + 6) * IMAGE_CHANNEL_COUNT;
+    TEST_CHECK(decoded.pixels[left] > decoded.pixels[left + 2]);
+    TEST_CHECK(decoded.pixels[right + 2] > decoded.pixels[right]);
+  }
+  image_free(&decoded);
+}
+
+// The decode scale is the smallest eighth that leaves every stale derivative's region, cropped as
+// configured and oriented, twice the derivative's size: an eighth for a 128 x 64 source, a quarter
+// for 64 x 32, where the `m` and `l` regions of an eighth would be only 8 x 4. With only the 2 x 2
+// `s` stale an eighth is enough again. A 64 x 128 source is 128 x 64 once turned by its
+// orientation, and an eighth suits it too, where upright it needs a quarter. A source no larger
+// than its derivatives decodes at full size.
+static void test_decode_scale_follows_stale_derivatives(void) {
+  struct Arena arena = test_arena();
+  struct MediaItem item;
+  struct GalleryConfig config;
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 90);
+  init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
+  const bool all_stale[] = {true, true, true};
+  const bool small_stale[] = {true, false, false};
+  TEST_CHECK(derivative_renderer_decode_scale(&config, &item, all_stale, 128, 64,
+                                              IMAGE_ORIENTATION_TOP_LEFT) == 1);
+  TEST_CHECK(derivative_renderer_decode_scale(&config, &item, all_stale, 64, 32,
+                                              IMAGE_ORIENTATION_TOP_LEFT) == 2);
+  TEST_CHECK(derivative_renderer_decode_scale(&config, &item, small_stale, 64, 32,
+                                              IMAGE_ORIENTATION_TOP_LEFT) == 1);
+  TEST_CHECK(derivative_renderer_decode_scale(&config, &item, all_stale, 64, 128,
+                                              IMAGE_ORIENTATION_TOP_LEFT) == 2);
+  TEST_CHECK(derivative_renderer_decode_scale(&config, &item, all_stale, 64, 128,
+                                              IMAGE_ORIENTATION_RIGHT_TOP) == 1);
+  TEST_CHECK(derivative_renderer_decode_scale(&config, &item, all_stale, 8, 4,
+                                              IMAGE_ORIENTATION_TOP_LEFT) == IMAGE_SCALE_FULL);
 }
 
 // Freshness is decided separately: a fresh thumbnail remains untouched while a zero-byte large
@@ -637,9 +722,9 @@ static void test_reports_directory_source_once(void) {
   TEST_CHECK(os_memory_files(os, "public").count == 0);
 }
 
-// A derivative source larger than the decoder's `IMAGE_INPUT_LEN_MAX` input limit is rejected at
-// the read, from its size, naming the limit and the size, rather than loaded whole and turned away
-// by the decoder. The source and the fresh original are sparse, so the fixture costs no memory.
+// A derivative source larger than `IMAGE_INPUT_LEN_MAX`, the media read limit, is rejected at the
+// read, from its size, naming the limit and the size, rather than being loaded whole. The source
+// and the fresh original are sparse, so the fixture costs no memory.
 static void test_rejects_oversize_source(void) {
   struct Os* os = os_memory();
   struct Arena arena = test_arena();
@@ -691,15 +776,17 @@ static void test_appends_one_error_line_per_failing_source(void) {
   TEST_CHECK(generate(&config, media, 2, frames, 2, false, os, &log) == -1);
   // Compared whole: a dropped newline, a lost line, or the wrong order each change these bytes.
   TEST_CHECK(test_log_is(&log,
-                         "failed to decode derivative source: failed to probe JPEG: unknown image "
-                         "type ('photos/a.jpg')\n"
-                         "failed to decode derivative source: failed to probe JPEG: unknown image "
-                         "type ('photos/b.jpg')\n"));
+                         "failed to decode derivative source: failed to probe JPEG: Not a JPEG "
+                         "file: starts with 0x6e 0x6f ('photos/a.jpg')\n"
+                         "failed to decode derivative source: failed to probe JPEG: Not a JPEG "
+                         "file: starts with 0x6e 0x6f ('photos/b.jpg')\n"));
   TEST_CHECK(log.errors == 2);
 }
 
 TEST_LIST = {
     {"generate image and skip fresh outputs", test_generate_image_and_skip_fresh_outputs},
+    {"generate decodes large source scaled", test_generate_decodes_large_source_scaled},
+    {"decode scale follows stale derivatives", test_decode_scale_follows_stale_derivatives},
     {"generate refreshes outputs independently", test_generate_refreshes_outputs_independently},
     {"generate avoids decode when derivatives fresh",
      test_generate_avoids_decode_when_derivatives_fresh},

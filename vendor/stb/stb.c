@@ -4,22 +4,11 @@
 // instead of returning `NULL`, so a failed allocation inside stb ends the build like every other.
 // stb's resizer passes a context pointer to its hooks, which these allocations do not need.
 #include "formats/image.h"
-#define STBI_MALLOC(size) image_alloc(size)
-#define STBI_REALLOC(data, size) image_realloc((data), (size))
-#define STBI_FREE(data) free(data)
 #define STBIR_MALLOC(size, user_data) ((void)(user_data), image_alloc(size))
 #define STBIR_FREE(data, user_data) ((void)(user_data), free(data))
 #define STBIW_MALLOC(size) image_alloc(size)
 #define STBIW_REALLOC(data, size) image_realloc((data), (size))
 #define STBIW_FREE(data) free(data)
-
-#define STBI_ONLY_JPEG
-#define STBI_NO_LINEAR
-#define STBI_NO_STDIO
-#define STBI_NO_THREAD_LOCALS
-#define STBI_THREAD_LOCAL _Thread_local
-#define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
 
 #define STB_IMAGE_RESIZE_IMPLEMENTATION
 #include "stb_image_resize2.h"

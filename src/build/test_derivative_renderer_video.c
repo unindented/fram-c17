@@ -118,8 +118,8 @@ static void init_item(struct MediaItem* item,
 }
 
 /**
- * @brief Runs a quiet derivative phase over fresh worker arenas, reading sources up to the
- *        decoder's own input limit.
+ * @brief Runs a quiet derivative phase over fresh worker arenas, reading sources up to the media
+ *        read limit.
  *
  * @param gallery_config Configured derivatives shared by every job. Must not be `NULL`.
  * @param media          Media items, one job per item. Must not be `NULL`.

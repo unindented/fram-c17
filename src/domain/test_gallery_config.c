@@ -1228,7 +1228,7 @@ static void test_derivative_recipe_encodes_output_values(void) {
   gallery_config_init(&config);
   struct Arena arena = test_arena();
   struct Str recipe = gallery_config_derivative_recipe(&config, &arena);
-  TEST_CHECK(str_eq(recipe, S("v1-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000")));
+  TEST_CHECK(str_eq(recipe, S("v2-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000")));
 
   const struct GalleryDerivative custom[] = {
       {.name = STR_INIT("tiny1"), .width_px = 7, .height_px = 8, .quality = 42, .is_crop = true},
@@ -1242,7 +1242,7 @@ static void test_derivative_recipe_encodes_output_values(void) {
   config.derivative_count = sizeof(custom) / sizeof(custom[0]);
   config.video_frame_seconds = 0;
   recipe = gallery_config_derivative_recipe(&config, &arena);
-  TEST_CHECK(str_eq(recipe, S("v1-tiny1-7x8c-q42-screen-90x100-q91-f0")));
+  TEST_CHECK(str_eq(recipe, S("v2-tiny1-7x8c-q42-screen-90x100-q91-f0")));
 }
 
 TEST_LIST = {
