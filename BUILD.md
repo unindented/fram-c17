@@ -39,6 +39,8 @@ The pinned stb implementation has its own translation unit, which compiles the r
 
 libjpeg-turbo builds from the source list its own build uses, with the configuration headers in `vendor/libjpeg-turbo/config/` in place of the ones that build generates. Its SIMD routines are compiled for x86-64, from NASM sources, and for AArch64, from Neon intrinsics. Any other target uses the C routines. An x86-64 build therefore needs NASM. The NASM sources form the object library `fram_vendor_libjpeg_turbo_simd`, because the vendored-code profile's options are for the C compiler, and NASM rejects them.
 
+libwebp builds its encoder and its decoder, the DSP and utility sources they use, and libsharpyuv, without the configuration header its own build generates. Only the tests decode WebP, so `fram` links none of the decoder. The encoder chooses its SIMD routines at run time. On x86-64, the SSE4.1 and AVX2 sources are compiled with their instruction sets enabled, and every other source is told they exist. `WEBP_USE_THREAD` makes the encoder's one-time DSP setup safe when several workers encode at once. libwebp also calls the math library, which the build links only where a call to it does not link on its own, as with glibc, which ships it apart from the C library.
+
 ### Generated dependency graph
 
 CMake generates this graph from the `release` preset. The graph shows CMake targets and link relationships. It does not show dependencies between source modules. Graph options remove test-only targets, such as the in-memory host `fram_os_memory`.

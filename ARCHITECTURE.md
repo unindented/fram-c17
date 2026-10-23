@@ -13,7 +13,7 @@
 - [tests/](tests/): Golden test suite, the shared unit-test support library ([tests/test_support.h](tests/test_support.h)), and the in-memory host ([tests/os_memory.h](tests/os_memory.h)).
 - [CMakeLists.txt](CMakeLists.txt) and [CMakePresets.json](CMakePresets.json): Project entry point and supported build configurations.
 - [cmake/](cmake/): Build profiles, quality tools, packaging, the golden test driver, and reusable cross toolchains. [BUILD.md](BUILD.md) documents their boundaries and policy.
-- [vendor/](vendor/): Bundled dependencies (`sharedstuff`, `copt`, `tomlc17`, `libjpeg-turbo`, `stb`, `mustache4c`, `acutest`).
+- [vendor/](vendor/): Bundled dependencies (`sharedstuff`, `copt`, `tomlc17`, `libjpeg-turbo`, `libwebp`, `stb`, `mustache4c`, `acutest`).
 
 First-party dependencies point inward:
 

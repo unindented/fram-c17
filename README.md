@@ -191,6 +191,7 @@ Vendored dependencies are included under `vendor/`:
 - [`copt`](https://github.com/fardaniqbal/copt): Command line option parsing.
 - [`tomlc17`](https://github.com/cktan/tomlc17): TOML configuration parsing.
 - [`libjpeg-turbo`](https://github.com/libjpeg-turbo/libjpeg-turbo): JPEG decoding.
+- [`libwebp`](https://chromium.googlesource.com/webm/libwebp): WebP encoding.
 - [`stb`](https://github.com/nothings/stb): JPEG encoding.
 - [`stb_image_resize`](https://github.com/nothings/stb_image_resize): Image resizing.
 - [`mustache4c`](https://github.com/mity/mustache4c): Mustache template rendering.
