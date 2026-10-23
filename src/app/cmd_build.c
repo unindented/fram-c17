@@ -555,7 +555,7 @@ static int load_build_inputs_static(struct BuildState* state, struct Log* log) {
   // failure names the directory or entry that failed, which is more precise than the configured
   // root, so the root is not repeated.
   struct OsStat st;
-  if (os_stat(state->os, state->gallery_config.static_dir, &st) != 0) {
+  if (os_stat(state->os, state->gallery_config.static_dir, &st) != 0 && errno == ENOENT) {
     return 0;
   }
   static const struct Str static_suffixes[] = {STR_INIT("")};
@@ -580,7 +580,9 @@ static int load_build_inputs_require_read_roots(const struct BuildState* state, 
     // Any other root gets two questions in order, because the second presupposes the first answer.
     //
     // Is it there at all? Only an optional root may answer no, and for that root absence is the
-    // expected case rather than a failure, so it is skipped without a message.
+    // expected case rather than a failure, so it is skipped without a message. Only `ENOENT`
+    // answers no. A root that cannot be inspected, such as one below a directory the user may not
+    // search, may well be there, so it is reported like any other.
     //
     // Is it usable? The message carries the cause. `ENOENT` and `EACCES` call for different fixes,
     // and nothing after this point would report either, because the build stops once a root is
@@ -592,7 +594,7 @@ static int load_build_inputs_require_read_roots(const struct BuildState* state, 
     }
     struct OsStat st;
     if (os_stat(state->os, roots[i].path, &st) != 0) {
-      if (roots[i].is_optional) {
+      if (roots[i].is_optional && errno == ENOENT) {
         continue;
       }
       char message[ERROR_SYSTEM_MESSAGE_SIZE];

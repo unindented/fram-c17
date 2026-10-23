@@ -940,6 +940,20 @@ static void test_reports_static_dir_that_is_a_file(void) {
                          "('static')\n"));
 }
 
+// A `static_dir` that cannot be inspected is reported with its cause rather than skipped as absent,
+// because it may well be there. A symlink that resolves to itself stands in for any such cause.
+static void test_reports_static_dir_that_cannot_be_inspected(void) {
+  struct Os* os = os_memory();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/album/one.jpg");
+  os_memory_symlink(os, "static", "static");
+
+  TEST_CHECK(execute_build(os, &log) == -1);
+  TEST_CHECK(test_log_is(&log, "failed to resolve config directory 'static_dir': %s ('static')\n",
+                         strerror(ELOOP)));
+}
+
 TEST_LIST = {
     {"honors configured album template", test_honors_configured_album_template},
     {"writes exactly manifest outputs", test_writes_exactly_manifest_outputs},
@@ -980,5 +994,7 @@ TEST_LIST = {
     {"rejects oversize source at probe", test_rejects_oversize_source_at_probe},
     {"reports unwritable output", test_reports_unwritable_output},
     {"reports static dir that is a file", test_reports_static_dir_that_is_a_file},
+    {"reports static dir that cannot be inspected",
+     test_reports_static_dir_that_cannot_be_inspected},
     {NULL, NULL},
 };
