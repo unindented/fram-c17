@@ -13,6 +13,7 @@
 #include "shared/str.h"
 #include "test_jpeg_fixture.h"
 #include "test_support.h"
+#include "test_webp_output.h"
 
 // A sanitizer's allocator ends the process itself when an allocation fails, so the decode that runs
 // out of memory cannot reach libjpeg-turbo's out-of-memory error under one. GCC defines
@@ -38,18 +39,6 @@ struct DecodeInput {
   struct Str data;
 };
 #endif
-
-/**
- * @brief Encodes one image for decoder and probe tests, recording why when it cannot.
- *
- * @param image    Image to encode. Must not be `NULL`.
- * @param arena    Arena that receives the JPEG bytes. Must not be `NULL`.
- * @param jpeg_out Receives the JPEG, which lives as long as `arena`. Written only on success. Must
- *                 not be `NULL`.
- * @return `0` on success, or `-1` after recording a test failure.
- */
-static int encode_fixture(const struct Image* image, struct Arena* arena, struct Str* jpeg_out)
-    __attribute__((nonnull(1, 2, 3)));
 
 /**
  * @brief Checks that an image holds one RGB color, within a tolerance, in every pixel.
@@ -81,13 +70,6 @@ static void check_orientation(enum ImageOrientation orientation,
  */
 static void alloc_beyond_object_len(void* userdata);
 
-/**
- * @brief Asks `image_realloc` for more bytes than any object can have.
- *
- * @param userdata Unused.
- */
-static void realloc_beyond_object_len(void* userdata);
-
 #ifdef TEST_HAS_ADDRESS_LIMIT
 /**
  * @brief Decodes a JPEG under an address-space limit that leaves no room for its full-size buffers.
@@ -99,18 +81,6 @@ static void realloc_beyond_object_len(void* userdata);
  */
 static void decode_under_address_limit(void* userdata) __attribute__((nonnull(1)));
 #endif
-
-static int encode_fixture(const struct Image* image, struct Arena* arena, struct Str* jpeg_out) {
-  struct Log log = test_log();
-  const int rc = image_encode_jpeg(image, 100, arena, jpeg_out, S("failed to encode fixture"),
-                                   S("fixture.jpg"), &log);
-  if (!TEST_CHECK(rc == 0)) {
-    const struct Str failure = buf_str(&log.buf);
-    TEST_MSG("%.*s", STR_FMT(failure));
-    return -1;
-  }
-  return 0;
-}
 
 static void check_solid(const struct Image* image, const unsigned char* color, int tolerance) {
   int difference_max = 0;
@@ -146,11 +116,6 @@ static void check_orientation(enum ImageOrientation orientation,
 static void alloc_beyond_object_len(void* userdata) {
   (void)userdata;
   (void)image_alloc((size_t)PTRDIFF_MAX + 1);
-}
-
-static void realloc_beyond_object_len(void* userdata) {
-  (void)userdata;
-  (void)image_realloc(NULL, SIZE_MAX);
 }
 
 #ifdef TEST_HAS_ADDRESS_LIMIT
@@ -213,21 +178,15 @@ static void test_image_fit_clamps_to_one_pixel(void) {
   TEST_CHECK(height == 1);
 }
 
-// Encoding produces a JPEG that the independent probe and decode entry points can consume.
-static void test_image_encode_probe_and_decode(void) {
-  unsigned char pixels[] = {
-      20, 100, 220, 20, 100, 220, 20, 100, 220, 20, 100, 220, 20, 100, 220, 20, 100, 220,
-  };
-  const struct Image source = {.pixels = pixels, .width_px = 3, .height_px = 2};
+// A baseline JPEG probes to its dimensions, with no coefficients to buffer, and decodes at full
+// size to its colors.
+static void test_image_probe_and_decode_baseline(void) {
+  static const unsigned char color[] = {20, 100, 220};
   struct Arena arena = test_arena();
   struct Str encoded = {0};
-  if (encode_fixture(&source, &arena, &encoded) != 0) {
+  if (!TEST_CHECK(test_jpeg_encode_solid(3, 2, color, TEST_JPEG_BASELINE, &arena, &encoded) == 0)) {
     return;
   }
-  TEST_CHECK(encoded.len > 4);
-  TEST_CHECK(str_startswith(encoded, S("\xFF\xD8")));
-  TEST_CHECK(str_endswith(encoded, S("\xFF\xD9")));
-
   struct ImageHeader header;
   struct Log log = test_log();
   TEST_CHECK(image_probe(encoded, &header, S("failed to probe"), S("a.jpg"), &log) == 0);
@@ -241,17 +200,35 @@ static void test_image_encode_probe_and_decode(void) {
   TEST_CHECK(test_log_is_empty(&log));
   TEST_CHECK(decoded.width_px == 3);
   TEST_CHECK(decoded.height_px == 2);
-  for (ptrdiff_t i = 0; i < 6; i++) {
-    TEST_CHECK(abs((int)decoded.pixels[i * 3] - 20) <= 3);
-    TEST_CHECK(abs((int)decoded.pixels[i * 3 + 1] - 100) <= 3);
-    TEST_CHECK(abs((int)decoded.pixels[i * 3 + 2] - 220) <= 3);
-  }
+  check_solid(&decoded, color, 3);
   image_free(&decoded);
 }
 
-// An encode returns the same JPEG bytes in every run, and they start where `perm` was free, which
+// Encoding produces a lossy WebP that decodes to the source's dimensions and colors.
+static void test_image_encode_webp_decodes_to_source(void) {
+  unsigned char pixels[] = {
+      20, 100, 220, 20, 100, 220, 20, 100, 220, 20, 100, 220, 20, 100, 220, 20, 100, 220,
+  };
+  const struct Image source = {.pixels = pixels, .width_px = 3, .height_px = 2};
+  struct Arena arena = test_arena();
+  struct Str encoded = {0};
+  struct Log log = test_log();
+  TEST_ASSERT(image_encode_webp(&source, 90, &arena, &encoded, S("op"), S("a.webp"), &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(str_startswith(encoded, S("RIFF")));
+  TEST_CHECK(str_eq(str_head(str_tail(encoded, 8), 4), S("WEBP")));
+
+  struct Image decoded = {0};
+  TEST_ASSERT(test_webp_decode(encoded, &decoded) == 0);
+  TEST_CHECK(decoded.width_px == 3);
+  TEST_CHECK(decoded.height_px == 2);
+  check_solid(&decoded, pixels, 6);
+  image_free(&decoded);
+}
+
+// An encode returns the same WebP bytes in every run, and they start where `perm` was free, which
 // is advanced past them.
-static void test_image_encode_is_deterministic_in_perm(void) {
+static void test_image_encode_webp_is_deterministic_in_perm(void) {
   enum { WIDTH = 32, HEIGHT = 24 };
   unsigned char pixels[WIDTH * HEIGHT * IMAGE_CHANNEL_COUNT];
   for (ptrdiff_t i = 0; i < (ptrdiff_t)sizeof(pixels); i++) {
@@ -263,12 +240,11 @@ static void test_image_encode_is_deterministic_in_perm(void) {
   const char* const perm_beg = arena.beg;
   struct Str first = {0};
   struct Str second = {0};
-  TEST_CHECK(image_encode_jpeg(&source, 90, &arena, &first, S("op"), S("a.jpg"), &log) == 0);
+  TEST_CHECK(image_encode_webp(&source, 90, &arena, &first, S("op"), S("a.webp"), &log) == 0);
   TEST_CHECK(first.data >= perm_beg && arena.beg >= first.data + first.len);
-  TEST_CHECK(image_encode_jpeg(&source, 90, &arena, &second, S("op"), S("a.jpg"), &log) == 0);
+  TEST_CHECK(image_encode_webp(&source, 90, &arena, &second, S("op"), S("a.webp"), &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
-  TEST_CHECK(first.len > 2 && (unsigned char)first.data[0] == 0xFF &&
-             (unsigned char)first.data[1] == 0xD8);
+  TEST_CHECK(str_startswith(first, S("RIFF")));
   TEST_CHECK(str_eq(first, second));
 }
 
@@ -648,7 +624,6 @@ static void test_image_orient_top_left_keeps_buffer(void) {
 // than returning `NULL` to a caller that would report a decode error.
 static void test_image_alloc_ends_in_oom(void) {
   TEST_CHECK(test_is_oom(alloc_beyond_object_len, NULL));
-  TEST_CHECK(test_is_oom(realloc_beyond_object_len, NULL));
 }
 
 // Freeing is idempotent and always restores the documented zero state.
@@ -666,8 +641,9 @@ TEST_LIST = {
     {"image fit does not enlarge", test_image_fit_does_not_enlarge},
     {"image fit preserves aspect ratio", test_image_fit_preserves_aspect_ratio},
     {"image fit clamps to one pixel", test_image_fit_clamps_to_one_pixel},
-    {"image encode probe and decode", test_image_encode_probe_and_decode},
-    {"image encode is deterministic in perm", test_image_encode_is_deterministic_in_perm},
+    {"image probe and decode baseline", test_image_probe_and_decode_baseline},
+    {"image encode webp decodes to source", test_image_encode_webp_decodes_to_source},
+    {"image encode webp is deterministic in perm", test_image_encode_webp_is_deterministic_in_perm},
     {"image decode scales in the dct", test_image_decode_scales_in_the_dct},
     {"image decode converts cmyk and ycck", test_image_decode_converts_cmyk_and_ycck},
     {"image probe reports multi scan coefficients",

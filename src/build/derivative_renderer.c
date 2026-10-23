@@ -288,9 +288,9 @@ static bool is_at_least_as_new(const struct OsStat* candidate, const struct OsSt
     __attribute__((nonnull(1, 2)));
 
 /**
- * @brief Resizes one region of an oriented image and writes it out as a JPEG.
+ * @brief Resizes one region of an oriented image and writes it out as a WebP.
  *
- * The region is selected inside `oriented` rather than copied out first. The JPEG is encoded into
+ * The region is selected inside `oriented` rather than copied out first. The WebP is encoded into
  * `scratch` and then written whole in one `os_write`, so an encode failure writes nothing. The
  * resized image is released before returning, on success and on failure alike.
  *
@@ -299,12 +299,12 @@ static bool is_at_least_as_new(const struct OsStat* candidate, const struct OsSt
  * @param source_y_px      Top edge of the source region, in oriented pixels.
  * @param source_width_px  Width of the source region. Must be positive and inside `oriented`.
  * @param source_height_px Height of the source region. Must be positive and inside `oriented`.
- * @param width_px         Output width in pixels, from 1 through `IMAGE_DIMENSION_MAX`.
- * @param height_px        Output height in pixels, from 1 through `IMAGE_DIMENSION_MAX`.
- * @param quality          JPEG quality from 1 through 100.
+ * @param width_px         Output width in pixels, from 1 through `IMAGE_ENCODED_DIMENSION_MAX`.
+ * @param height_px        Output height in pixels, from 1 through `IMAGE_ENCODED_DIMENSION_MAX`.
+ * @param quality          WebP quality from 1 through 100.
  * @param output_path      Destination path, whose parent directories are created as needed.
  * @param os               Host the output is written to. Must not be `NULL`.
- * @param scratch          Arena the encoded JPEG is held in until it is written.
+ * @param scratch          Arena the encoded WebP is held in until it is written.
  * @param operation        Operation leading the failure message, which names `output_path`.
  * @param log              Log that receives the failure. Must not be `NULL`.
  * @return `0` on success, or `-1` on a resize, encode, or write failure.
@@ -471,7 +471,8 @@ static int render_derivatives_images(const struct DerivativeContext* context,
       context->gallery_config, item, is_stale, header.width_px, header.height_px, orientation);
   // The reservation uses the header of the bytes about to be decoded, not the dimensions the probe
   // phase recorded, so a source replaced since then cannot reserve less than it decodes. A
-  // reservation above the budget would wait forever, so it is capped, and that job runs alone.
+  // reservation above the budget, which only a derivative of more than about 55 million pixels
+  // makes, would wait forever, so it is capped, and that job runs alone.
   ptrdiff_t width = 0;
   ptrdiff_t height = 0;
   image_scale_size(header.width_px, header.height_px, scale_eighths, &width, &height);
@@ -534,7 +535,8 @@ static int write_stale_derivatives(const struct DerivativeContext* context,
   // them, after a source of `JOB_SOURCE_DISCARD_LEN_MIN` or more was given back, and the largest
   // derivative's resize and encode beside the oriented source, as `IMAGE_ENCODE_LEN_PER_PX` counts
   // them. An upright source is oriented in place. The resizer adds at most three padding bytes per
-  // row for aligned stb stores. The encoded JPEG is held in the job's scratch until its one write.
+  // row for aligned stb stores. The encoder's own memory is released after each derivative, and the
+  // encoded WebP is held in the job's scratch until its one write.
   const struct MediaItem* item = context->media[index];
   int rc = 0;
   for (ptrdiff_t i = 0; i < item->derivative_count; i++) {
@@ -636,11 +638,11 @@ static int write_derivative(const struct Image* oriented,
                           width_px, height_px, &resized, operation, output_path, log) != 0) {
     return -1;
   }
-  struct Str jpeg = {0};
-  int rc = image_encode_jpeg(&resized, quality, &scratch, &jpeg, operation, output_path, log);
+  struct Str webp = {0};
+  int rc = image_encode_webp(&resized, quality, &scratch, &webp, operation, output_path, log);
   image_free(&resized);
   if (rc == 0) {
-    rc = os_write(os, output_path, (struct OsSource){.bytes = jpeg}, operation, log);
+    rc = os_write(os, output_path, (struct OsSource){.bytes = webp}, operation, log);
   }
   return rc;
 }

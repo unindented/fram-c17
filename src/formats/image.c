@@ -16,7 +16,7 @@
 #include "shared/log.h"
 #include "shared/str.h"
 #include "stb_image_resize2.h"
-#include "stb_image_write.h"
+#include "webp/encode.h"
 
 /** Describes a destination-to-source coordinate transform. */
 struct OrientationTransform {
@@ -31,24 +31,6 @@ struct OrientationTransform {
 
   /** Whether the source row is taken from the opposite edge, after any transpose. */
   bool is_mirrored_y;
-};
-
-/** Collects the chunks stb's callback JPEG encoder emits into one bounded buffer. */
-struct JpegOutput {
-  /** Bytes taken so far, never more than `IMAGE_ENCODED_LEN_MAX`. */
-  struct Buf buf;
-
-  /**
-   * Bytes stb emitted so far. Once they pass `IMAGE_ENCODED_LEN_MAX`, later chunks are only
-   * counted, so the error can name the whole encoded length.
-   */
-  ptrdiff_t len;
-
-  /**
-   * Latched when a chunk would push `len` past `IMAGE_ENCODED_LEN_MAX`. That chunk and every later
-   * one are dropped.
-   */
-  bool has_exceeded_limit;
 };
 
 /**
@@ -94,6 +76,8 @@ _Static_assert((ptrdiff_t)IMAGE_DIMENSION_MAX <= PTRDIFF_MAX / (ptrdiff_t)IMAGE_
                "image dimension square must fit in ptrdiff_t");
 _Static_assert(IMAGE_PIXEL_COUNT_MAX <= PTRDIFF_MAX / IMAGE_CHANNEL_COUNT,
                "image byte bound must fit in ptrdiff_t");
+_Static_assert(IMAGE_ENCODED_DIMENSION_MAX == WEBP_MAX_DIMENSION,
+               "encoded dimension bound must be WebP's");
 
 /**
  * Where an operation reports its failure: the caller's operation, which leads the message, the file
@@ -219,18 +203,16 @@ static void cmyk_convert_row(const unsigned char* cmyk, ptrdiff_t width_px, unsi
     __attribute__((nonnull(1, 3)));
 
 /**
- * @brief Appends one encoder chunk to a bounded JPEG output.
+ * @brief Appends one encoder chunk to the WebP output.
  *
- * stb's callback cannot signal failure. This function latches an output that would exceed
- * `IMAGE_ENCODED_LEN_MAX` and drops later chunks, bounding the buffer even though stb finishes its
- * current encode. Past the limit it still counts each chunk, so the error names the whole encoded
- * length.
- *
- * @param context `struct JpegOutput` receiving the chunk. Must not be `NULL`.
- * @param data    Chunk bytes. Must not be `NULL` when `size` is positive.
- * @param size    Chunk length from stb.
+ * @param data      Chunk bytes. Must not be `NULL` when `data_size` is positive.
+ * @param data_size Chunk length.
+ * @param picture   Picture being encoded, whose `custom_ptr` is the output's `struct Buf`. Must not
+ *                  be `NULL`.
+ * @return `1`, so the encoder carries on.
  */
-static void jpeg_write(void* context, void* data, int size) __attribute__((nonnull(1)));
+static int webp_write(const uint8_t* data, size_t data_size, const WebPPicture* picture)
+    __attribute__((nonnull(3)));
 
 int image_probe(struct Str data,
                 struct ImageHeader* header_out,
@@ -352,31 +334,50 @@ int image_resize_region(const struct Image* image,
   return 0;
 }
 
-int image_encode_jpeg(const struct Image* image,
+int image_encode_webp(const struct Image* image,
                       ptrdiff_t quality,
                       struct Arena* perm,
-                      struct Str* jpeg_out,
+                      struct Str* webp_out,
                       struct Str operation,
                       struct Str file_path,
                       struct Log* log) {
+  WebPConfig config;
+  WebPPicture picture;
+  // Both fail only for a header that disagrees with the library it is linked against.
+  (void)WebPConfigInit(&config);
+  (void)WebPPictureInit(&picture);
+  config.quality = (float)quality;
+
   // The bytes grow in a copy of `perm`, which is published only on success.
   struct Arena arena = *perm;
-  struct JpegOutput output = {.buf = {.arena = &arena}};
+  struct Buf output = {.arena = &arena};
+  picture.width = (int)image->width_px;
+  picture.height = (int)image->height_px;
+  picture.writer = webp_write;
+  picture.custom_ptr = &output;
+  // The import converts the pixels to the encoder's YUV planes, which the picture owns.
   const int is_encoded =
-      stbi_write_jpg_to_func(jpeg_write, &output, (int)image->width_px, (int)image->height_px,
-                             IMAGE_CHANNEL_COUNT, image->pixels, (int)quality);
-  if (output.has_exceeded_limit) {
-    return log_error(log,
-                     "%.*s: JPEG output exceeds max encoded length (%d bytes) at %td bytes "
-                     "('%.*s')",
-                     STR_FMT(operation), IMAGE_ENCODED_LEN_MAX, output.len, STR_FMT(file_path));
+      WebPPictureImportRGB(&picture, image->pixels, (int)(image->width_px * IMAGE_CHANNEL_COUNT)) &&
+      WebPEncode(&config, &picture);
+  const WebPEncodingError error = picture.error_code;
+  WebPPictureFree(&picture);
+  // libwebp reports a failed allocation as an encoding error, and that one ends the build in
+  // `os_oom` instead, like every other failed allocation.
+  if (error == VP8_ENC_ERROR_OUT_OF_MEMORY || error == VP8_ENC_ERROR_BITSTREAM_OUT_OF_MEMORY) {
+    os_oom();
   }
-  if (is_encoded == 0 || output.len == 0) {
-    return log_error(log, "%.*s: failed to encode JPEG ('%.*s')", STR_FMT(operation),
-                     STR_FMT(file_path));
+  if (!is_encoded) {
+    // Within `IMAGE_ENCODED_DIMENSION_MAX`, only a partition that outgrows the format's limit can
+    // fail an encode.
+    const char* reason =
+        error == VP8_ENC_ERROR_PARTITION0_OVERFLOW || error == VP8_ENC_ERROR_PARTITION_OVERFLOW
+            ? "partition overflows its size limit"
+            : "encoder error";
+    return log_error(log, "%.*s: failed to encode WebP: %s (%d) ('%.*s')", STR_FMT(operation),
+                     reason, (int)error, STR_FMT(file_path));
   }
   *perm = arena;
-  *jpeg_out = buf_str(&output.buf);
+  *webp_out = buf_str(&output);
   return 0;
 }
 
@@ -445,19 +446,14 @@ void image_orient_size(enum ImageOrientation orientation,
 }
 
 void* image_alloc(size_t size) {
-  return image_realloc(NULL, size);
-}
-
-void* image_realloc(void* data, size_t size) {
-  // A zero size frees, as `realloc` may, but explicitly, because what `realloc` returns for it is
+  // A zero size returns `NULL` explicitly, because what `malloc` returns for it is
   // implementation-defined.
   if (size == 0) {
-    free(data);
     return NULL;
   }
   // No object can be larger than `PTRDIFF_MAX`, because a pointer difference inside it would
-  // overflow, so a larger request cannot succeed and is refused before `realloc` sees it.
-  void* result = size <= (size_t)PTRDIFF_MAX ? realloc(data, size) : NULL;
+  // overflow, so a larger request cannot succeed and is refused before `malloc` sees it.
+  void* result = size <= (size_t)PTRDIFF_MAX ? malloc(size) : NULL;
   if (result == NULL) {
     os_oom();
   }
@@ -646,17 +642,7 @@ static void cmyk_convert_row(const unsigned char* cmyk, ptrdiff_t width_px, unsi
   }
 }
 
-static void jpeg_write(void* context, void* data, int size) {
-  struct JpegOutput* output = context;
-  if (size <= 0) {
-    return;
-  }
-  if (output->has_exceeded_limit || size > IMAGE_ENCODED_LEN_MAX - output->len) {
-    output->has_exceeded_limit = true;
-    // The count saturates instead of wrapping when the output is too large for a `ptrdiff_t`.
-    output->len = size > PTRDIFF_MAX - output->len ? PTRDIFF_MAX : output->len + size;
-    return;
-  }
-  buf_append(&output->buf, (struct Str){data, size});
-  output->len += size;
+static int webp_write(const uint8_t* data, size_t data_size, const WebPPicture* picture) {
+  buf_append(picture->custom_ptr, (struct Str){(const char*)data, (ptrdiff_t)data_size});
+  return 1;
 }

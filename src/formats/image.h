@@ -31,13 +31,21 @@ enum { IMAGE_INPUT_LEN_MAX = INT_MAX };
  */
 enum { IMAGE_SCALE_FULL = 8 };
 
+/** Largest encoded width or height, in pixels, the most a WebP image's 14-bit size fields hold. */
+enum { IMAGE_ENCODED_DIMENSION_MAX = 16383 };
+
 /**
  * Bytes, for each pixel of an encoded image, that resizing to it and encoding it hold: the resized
- * pixels' three, beside the encoder's working memory, which the JPEG writer keeps to a few tables.
+ * pixels' three and up to 32 for libwebp's encoder, which measured up to 9.4 for photographs at
+ * quality 90 and 29 for noise at quality 100.
  */
-enum { IMAGE_ENCODE_LEN_PER_PX = IMAGE_CHANNEL_COUNT };
+enum { IMAGE_ENCODE_LEN_PER_PX = IMAGE_CHANNEL_COUNT + 32 };
 
-/** Largest JPEG output the encoder passes on, in bytes. A longer encode fails partway. */
+/**
+ * Bytes a worker's scratch keeps for one encoded WebP. The largest measured, a 10000 x 10000 image
+ * of noise at quality 100, took 110 MB, and an encode past this could run the scratch out, which
+ * ends the build in `os_oom`.
+ */
 enum { IMAGE_ENCODED_LEN_MAX = 512 * 1024 * 1024 };
 
 /** TIFF/EXIF orientation values, named for the stored image's first row and column. */
@@ -233,25 +241,27 @@ int image_resize_region(const struct Image* image,
                         struct Log* log) __attribute__((nonnull(1, 8, 11)));
 
 /**
- * @brief Encodes an RGB image as a JPEG held in `perm`.
+ * @brief Encodes an RGB image as a lossy WebP held in `perm`.
  *
  * The bytes grow as one buffer at the end of `perm`, so the encoder copies nothing as they grow. A
- * failure leaves `perm` as it found it.
+ * failure leaves `perm` as it found it. The encoder's own working memory is on `malloc` and is
+ * released before this returns, and a failed allocation inside it ends the build in `os_oom`.
  *
- * @param image     Source RGB image. Must contain valid bounded dimensions and pixels.
- * @param quality   JPEG quality from 1 through 100.
+ * @param image     Source RGB image. Must contain valid pixels, and dimensions from 1 through
+ *                  `IMAGE_ENCODED_DIMENSION_MAX`.
+ * @param quality   WebP quality from 1 through 100.
  * @param perm      Arena the encoded bytes are allocated from. Must not be `NULL`.
- * @param jpeg_out  Receives the encoded bytes on success. Written only on success. Must not be
+ * @param webp_out  Receives the encoded bytes on success. Written only on success. Must not be
  *                  `NULL`.
  * @param operation Operation leading the failure message.
  * @param file_path File the bytes go to, named at the end of the message.
  * @param log       Log that receives the failure. Must not be `NULL`.
- * @return `0` on success, or `-1` for an output past `IMAGE_ENCODED_LEN_MAX` or an encoder failure.
+ * @return `0` on success, or `-1` for an encoder failure.
  */
-int image_encode_jpeg(const struct Image* image,
+int image_encode_webp(const struct Image* image,
                       ptrdiff_t quality,
                       struct Arena* perm,
-                      struct Str* jpeg_out,
+                      struct Str* webp_out,
                       struct Str operation,
                       struct Str file_path,
                       struct Log* log) __attribute__((nonnull(1, 3, 4, 7)));
@@ -318,24 +328,14 @@ void image_orient_size(enum ImageOrientation orientation,
  * @brief Allocates `size` bytes like `malloc`, calling `os_oom` instead of returning a failure.
  *
  * This is the allocator behind every pixel buffer this module allocates, and behind the working
- * memory of stb's resizer and JPEG writer, which `vendor/stb/stb.c` routes here through stb's
- * allocator hooks. A failed pixel allocation therefore ends the build like any other failed
- * allocation, and the report names the file, rather than reaching a caller as a decode error.
- * Release the memory with `free`.
+ * memory of stb's resizer, which `vendor/stb/stb.c` routes here through stb's allocator hooks. A
+ * failed pixel allocation therefore ends the build like any other failed allocation, and the report
+ * names the file, rather than reaching a caller as a decode error. Release the memory with `free`.
  *
  * @param size Bytes to allocate. A request above `PTRDIFF_MAX` cannot succeed and calls `os_oom`.
  * @return The allocation. `NULL` only for a zero `size`, as `malloc` allows.
  */
 void* image_alloc(size_t size);
-
-/**
- * @brief Resizes an allocation like `realloc`, calling `os_oom` instead of returning a failure.
- *
- * @param data Allocation from `image_alloc` or `image_realloc` to resize, or `NULL` to allocate.
- * @param size New size in bytes. A request above `PTRDIFF_MAX` cannot succeed and calls `os_oom`.
- * @return The resized allocation, or `NULL` for a zero `size`, which frees `data`.
- */
-void* image_realloc(void* data, size_t size);
 
 /**
  * @brief Releases an image and resets it to the zero state.

@@ -86,9 +86,9 @@ endif()
 
 foreach(file IN LISTS expected_files)
   # An original is a byte copy of its source, so it is compared exactly like every non-media file.
-  if(NOT file MATCHES "^_fram/originals/" AND file MATCHES "\\.jpg$")
-    # Generated JPEG bytes vary across stb versions and SIMD paths. The list check above pins the
-    # path. Unit tests pin dimensions and pixels, and this check rules out an empty write.
+  if(NOT file MATCHES "^_fram/originals/" AND file MATCHES "\\.webp$")
+    # Generated WebP bytes vary across libwebp versions and SIMD paths. The list check above pins
+    # the path. Unit tests pin dimensions and pixels, and this check rules out an empty write.
     file(SIZE "${actual_dir}/${file}" actual_len)
     if(actual_len EQUAL 0)
       message(FATAL_ERROR "generated media is empty: '${file}'")

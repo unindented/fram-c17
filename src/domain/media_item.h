@@ -16,7 +16,7 @@ enum MediaKind {
   MEDIA_KIND_VIDEO,
 };
 
-/** One configured JPEG derivative belonging to a media item. */
+/** One configured WebP derivative belonging to a media item. */
 struct MediaDerivative {
   /** Configured derivative name. */
   struct Str name;

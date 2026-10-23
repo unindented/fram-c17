@@ -11,7 +11,6 @@
 #include "build/job.h"
 #include "build/test_derivative_renderer.h"
 #include "build/test_job_arenas.h"
-#include "build/test_jpeg.h"
 #include "core/path.h"
 #include "domain/gallery_config.h"
 #include "domain/media_item.h"
@@ -23,6 +22,7 @@
 #include "shared/buf.h"
 #include "shared/log.h"
 #include "shared/str.h"
+#include "test_jpeg_fixture.h"
 #include "test_support.h"
 
 // The video case of the derivative phase. A video's frame is a file `ffmpeg` wrote on the real
@@ -88,19 +88,19 @@ static void init_item(struct MediaItem* item,
   struct MediaDerivative* derivatives = arena_new(arena, 3, struct MediaDerivative);
   derivatives[0] = (struct MediaDerivative){
       .name = S("s"),
-      .path = fixture_path(root_dir, "public/s.jpg", arena),
+      .path = fixture_path(root_dir, "public/s.webp", arena),
       .width_px = 2,
       .height_px = 2,
   };
   derivatives[1] = (struct MediaDerivative){
       .name = S("m"),
-      .path = fixture_path(root_dir, "public/m.jpg", arena),
+      .path = fixture_path(root_dir, "public/m.webp", arena),
       .width_px = 8,
       .height_px = 4,
   };
   derivatives[2] = (struct MediaDerivative){
       .name = S("l"),
-      .path = fixture_path(root_dir, "public/l.jpg", arena),
+      .path = fixture_path(root_dir, "public/l.webp", arena),
       .width_px = 8,
       .height_px = 4,
   };

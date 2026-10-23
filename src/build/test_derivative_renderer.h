@@ -21,7 +21,7 @@
  * @param small_height Height of the `s` derivative in pixels.
  * @param large_width  Width bound of the `l` derivative in pixels.
  * @param large_height Height bound of the `l` derivative in pixels.
- * @param quality      JPEG quality shared by every derivative, from 1 through 100.
+ * @param quality      WebP quality shared by every derivative, from 1 through 100.
  */
 static inline void test_derivative_renderer_init_config(struct GalleryConfig* config,
                                                         ptrdiff_t small_width,

@@ -121,7 +121,7 @@ video_frame_seconds = 1
 
 Template names in the configuration must be safe relative paths. They can contain letters, digits, `_`, `-`, `.`, and `/`. They cannot contain empty segments or the segments `.` and `..`.
 
-Derivative names must be at most 15 bytes, start with an ASCII letter, and then contain only ASCII letters, digits, or `_`. A gallery can define from one through six derivatives. Each derivative must provide `width`, `height`, and JPEG `quality` from 1 through 100; `crop = true` center-crops to that aspect ratio before resizing. The default `s` derivative is a cropped 120 x 120 image at quality 70. The default `m` derivative is a cropped 520 x 360 image at quality 80. The default `l` derivative fits the complete image within 792 x 594 at quality 85. A `derivatives` table replaces the defaults rather than adding to them, so a gallery that adds a derivative such as `xl` lists the defaults it still uses too.
+Derivative names must be at most 15 bytes, start with an ASCII letter, and then contain only ASCII letters, digits, or `_`. A gallery can define from one through six derivatives. Each derivative must provide `width` and `height`, each at most 16,383, and WebP `quality` from 1 through 100; `crop = true` center-crops to that aspect ratio before resizing. The default `s` derivative is a cropped 120 x 120 image at quality 70. The default `m` derivative is a cropped 520 x 360 image at quality 80. The default `l` derivative fits the complete image within 792 x 594 at quality 85. A `derivatives` table replaces the defaults rather than adding to them, so a gallery that adds a derivative such as `xl` lists the defaults it still uses too.
 
 An aggregate template name has two uses. It is the source path below `templates_dir` and the output path below `output_dir`. A nested name creates the same subdirectories in `output_dir`. Use an empty array to disable aggregate templates.
 
@@ -129,11 +129,11 @@ An aggregate template name has two uses. It is the source path below `templates_
 
 Each directory below `input_dir` that contains matching media or an album descendant becomes a nested album page. The root input directory becomes `output_dir/index.html`. Albums and media sort by source filename, in the order `sort.albums` and `sort.media` set, each ascending by default. Dated album directories can then list newest first while the files in each album keep their shooting order. An album's cover is the first media item it lists, or, when it has no media of its own, the cover of the first child album it lists. Generated album directory segments and media filenames are lowercase URL-safe slugs; source files and directories are never renamed. Album and media titles display underscores as spaces, and the HTML `download` name uses that humanized media title.
 
-Each JPEG produces every configured derivative and a copied original. The tool applies EXIF orientation before sizing the derivatives, then applies each derivative's crop policy independently. Each MP4 produces the same derivative set from an auto-rotated poster frame, while its copied original remains the video played by the gallery.
+Each JPEG produces every configured derivative, a lossy WebP image, and a copied original. The tool applies EXIF orientation before sizing the derivatives, then applies each derivative's crop policy independently. Each MP4 produces the same derivative set from an auto-rotated poster frame, while its copied original remains the video played by the gallery.
 
-A source image can have at most 100 million pixels. Each source is decoded scaled down, in eighths, to the smallest size that leaves its stale derivatives at least twice their size to resize from, so a large photo decodes a fraction of its pixels. Derivative workers share one memory budget of about 2 GiB for decoding sources and writing derivatives, so that memory does not grow with `--workers`: at least two maximum-size images decode at once, and more of smaller ones.
+A source image can have at most 100 million pixels. Each source is decoded scaled down, in eighths, to the smallest size that leaves its stale derivatives at least twice their size to resize from, so a large photo decodes a fraction of its pixels. Derivative workers share one memory budget of about 2 GiB for decoding sources and writing derivatives, so that memory does not grow with `--workers`: at least two maximum-size images decode at once, and more of smaller ones. A derivative of more than about 55 million pixels makes each job that writes it run alone.
 
-Generated derivatives live at `_fram/<recipe>/<album-slug>/<media-slug>-<derivative>.jpg`, where the media slug includes the source extension (`foo.jpg` becomes `foo-jpg`). The recipe name includes every derivative name, dimensions, crop policy, JPEG quality, poster-frame position, and derivative algorithm version. All derivatives for one media item therefore share one album directory. Originals live at `_fram/originals/<album-slug>/<media-slug>.<source-extension>`. Changing an output-affecting setting cannot reuse derivatives from an older recipe.
+Generated derivatives live at `_fram/<recipe>/<album-slug>/<media-slug>-<derivative>.webp`, where the media slug includes the source extension (`foo.jpg` becomes `foo-jpg`). The recipe name includes every derivative name, dimensions, crop policy, WebP quality, poster-frame position, and derivative algorithm version. All derivatives for one media item therefore share one album directory. Originals live at `_fram/originals/<album-slug>/<media-slug>.<source-extension>`. Changing an output-affecting setting cannot reuse derivatives from an older recipe.
 
 MP4 galleries require the `ffmpeg` and `ffprobe` executables on `PATH`. Image-only galleries do not.
 
@@ -192,7 +192,6 @@ Vendored dependencies are included under `vendor/`:
 - [`tomlc17`](https://github.com/cktan/tomlc17): TOML configuration parsing.
 - [`libjpeg-turbo`](https://github.com/libjpeg-turbo/libjpeg-turbo): JPEG decoding.
 - [`libwebp`](https://chromium.googlesource.com/webm/libwebp): WebP encoding.
-- [`stb`](https://github.com/nothings/stb): JPEG encoding.
 - [`stb_image_resize`](https://github.com/nothings/stb_image_resize): Image resizing.
 - [`mustache4c`](https://github.com/mity/mustache4c): Mustache template rendering.
 - [`acutest`](https://github.com/mity/acutest): Tests.

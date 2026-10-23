@@ -7,9 +7,9 @@
 add_library(fram_test_support OBJECT test_support.c)
 target_include_directories(fram_test_support PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}>")
 target_link_libraries(fram_test_support PRIVATE fram_build_tests fram_vendor_acutest fram_app)
-# The fixture JPEG encoder calls libjpeg-turbo itself.
-target_sources(fram_test_support PRIVATE test_jpeg_fixture.c)
-target_link_libraries(fram_test_support PRIVATE fram_vendor_libjpeg_turbo)
+# The fixture JPEG encoder and the WebP output decoder call their codecs themselves.
+target_sources(fram_test_support PRIVATE test_jpeg_fixture.c test_webp_output.c)
+target_link_libraries(fram_test_support PRIVATE fram_vendor_libjpeg_turbo fram_vendor_libwebp)
 if(PROJECT_IS_TOP_LEVEL)
   fram_enable_test_analysis(fram_test_support)
 endif()

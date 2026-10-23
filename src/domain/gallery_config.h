@@ -43,7 +43,7 @@ struct GalleryDerivative {
   ptrdiff_t width_px;
   ptrdiff_t height_px;
 
-  /** JPEG quality in the range 1 through 100. */
+  /** WebP quality in the range 1 through 100. */
   ptrdiff_t quality;
 
   /** Whether the source is center-cropped to the bounding-box aspect ratio before resizing. */

@@ -26,6 +26,23 @@ enum TestJpegKind {
 };
 
 /**
+ * @brief Encodes a baseline fixture of the given size with a fixed, non-uniform pixel pattern, at
+ *        quality 90, recording why when it cannot.
+ *
+ * The pattern is asymmetric, so an orientation or crop mistake changes the encoded result.
+ *
+ * @param width_px  Fixture width in pixels. Must be positive.
+ * @param height_px Fixture height in pixels. Must be positive.
+ * @param arena     Arena that receives the encoded bytes. Must not be `NULL`.
+ * @param jpeg_out  Receives the encoded JPEG, which lives as long as `arena`. Must not be `NULL`.
+ * @return `0` on success, or `-1` on an encoding failure.
+ */
+int test_jpeg_encode(ptrdiff_t width_px,
+                     ptrdiff_t height_px,
+                     struct Arena* arena,
+                     struct Str* jpeg_out) __attribute__((nonnull(3, 4)));
+
+/**
  * @brief Encodes an RGB image as a fixture JPEG of one kind, recording why when it cannot.
  *
  * The encoder is libjpeg-turbo's, the same library `image_decode` uses, so a fixture exercises

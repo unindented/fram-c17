@@ -13,7 +13,6 @@
 #include "build/job.h"
 #include "build/test_album_scanner.h"
 #include "build/test_job_arenas.h"
-#include "build/test_jpeg.h"
 #include "core/path.h"
 #include "core/path_list.h"
 #include "domain/album.h"
@@ -26,6 +25,7 @@
 #include "shared/buf.h"
 #include "shared/log.h"
 #include "shared/str.h"
+#include "test_jpeg_fixture.h"
 #include "test_support.h"
 
 /** Largest file a test here reads back, in bytes. Every fixture file is a few hundred bytes. */
@@ -219,10 +219,10 @@ static void test_build_skeleton_derives_nested_gallery(void) {
   TEST_CHECK(str_eq(media[0]->derivatives[0].name, S("s")));
   TEST_CHECK(str_eq(media[0]->derivatives[0].url,
                     S("_fram/v2-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
-                      "2024/japan/a-jpg-s.jpg")));
+                      "2024/japan/a-jpg-s.webp")));
   TEST_CHECK(str_eq(media[0]->derivatives[0].path,
                     S("/public/_fram/v2-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
-                      "2024/japan/a-jpg-s.jpg")));
+                      "2024/japan/a-jpg-s.webp")));
   TEST_CHECK(str_eq(media[1]->original_url, S("_fram/originals/2024/japan/clip-mp4.mp4")));
   TEST_CHECK(albums[2]->media_count == 2);
   TEST_CHECK(albums[2]->media[0] == media[0]);
@@ -330,7 +330,7 @@ static void test_build_skeleton_humanizes_album_title(void) {
   TEST_CHECK(str_eq(media[0]->title, S("My Photo.JPG")));
   TEST_CHECK(str_eq(media[0]->derivatives[0].url,
                     S("_fram/v2-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
-                      "john-white-alexander/my-photo-jpg-s.jpg")));
+                      "john-white-alexander/my-photo-jpg-s.webp")));
 }
 
 // Slugging keeps a source named `_fram` separate from the internal `_fram` output namespace.
@@ -355,7 +355,7 @@ static void test_build_skeleton_slugs_internal_namespace_source(void) {
   TEST_CHECK(str_eq(albums[1]->url_path, S("fram/index.html")));
   TEST_CHECK(str_eq(media[0]->derivatives[0].url,
                     S("_fram/v2-s-120x120c-q70-m-520x360c-q80-l-792x594-q85-f1000/"
-                      "fram/x-jpg-s.jpg")));
+                      "fram/x-jpg-s.webp")));
 }
 
 // `media = "desc"` reverses each album's direct media at every level, and leaves every album's
@@ -451,7 +451,7 @@ static void test_build_skeleton_keeps_flat_arrays_in_source_order(void) {
 }
 
 // Derivative suffixes are included when validating the portable per-component output limit. Each
-// derivative's filename is the stem plus `-jpg-<name>.jpg`, which puts it past the limit while the
+// derivative's filename is the stem plus `-jpg-<name>.webp`, which puts it past the limit while the
 // source name itself still fits, and so is the original copy's `-jpg.jpg`. The source is reported
 // once, at its first output in planning order, and no skeleton is published. Without derivatives,
 // the original copy is that first output.
@@ -472,11 +472,11 @@ static void test_build_skeleton_rejects_overlong_derivative_name(void) {
   struct Log log = test_log();
   TEST_CHECK(album_scanner_build_skeleton(&config, &paths, &perm, test_arena(), &albums,
                                           &album_count, &media, &media_count, &log) == -1);
-  const int derivative_len = STEM_LEN + (int)(sizeof("-jpg-s.jpg") - 1);
+  const int derivative_len = STEM_LEN + (int)(sizeof("-jpg-s.webp") - 1);
   const int original_len = STEM_LEN + (int)(sizeof("-jpg.jpg") - 1);
   TEST_CHECK(test_log_is(&log,
                          "output path segment for '%.*s' exceeds max filename length (%d bytes) "
-                         "at %d bytes: '%.*s-jpg-s.jpg'\n",
+                         "at %d bytes: '%.*s-jpg-s.webp'\n",
                          STR_FMT(source), FILENAME_LEN_MAX, derivative_len, STR_FMT(stem)));
   TEST_CHECK(log.errors == 1);
   TEST_CHECK(albums == NULL);
@@ -507,7 +507,7 @@ static void test_build_skeleton_reports_every_path_limit_failure(void) {
   struct Arena perm = test_arena();
   const struct Arena perm_before = perm;
   struct Arena arena = test_arena();
-  // `-jpg-s.jpg` takes the stem one byte past the limit, and the original's `-jpg.jpg` fits.
+  // `-jpg-s.webp` takes the stem one byte past the limit, and the original's `-jpg.jpg` fits.
   enum { STEM_LEN = FILENAME_LEN_MAX - 9 };
   const struct Str first = long_source_path('a', STEM_LEN, &arena);
   const struct Str second = long_source_path('b', STEM_LEN, &arena);
@@ -522,12 +522,12 @@ static void test_build_skeleton_reports_every_path_limit_failure(void) {
   struct Log log = test_log();
   TEST_CHECK(album_scanner_build_skeleton(&config, &paths, &perm, test_arena(), &albums,
                                           &album_count, &media, &media_count, &log) == -1);
-  const int segment_len = STEM_LEN + (int)(sizeof("-jpg-s.jpg") - 1);
+  const int segment_len = STEM_LEN + (int)(sizeof("-jpg-s.webp") - 1);
   TEST_CHECK(test_log_is(&log,
                          "output path segment for '%.*s' exceeds max filename length (%d bytes) "
-                         "at %d bytes: '%.*s-jpg-s.jpg'\n"
+                         "at %d bytes: '%.*s-jpg-s.webp'\n"
                          "output path segment for '%.*s' exceeds max filename length (%d bytes) "
-                         "at %d bytes: '%.*s-jpg-s.jpg'\n",
+                         "at %d bytes: '%.*s-jpg-s.webp'\n",
                          STR_FMT(first), FILENAME_LEN_MAX, segment_len, STR_FMT(first_stem),
                          STR_FMT(second), FILENAME_LEN_MAX, segment_len, STR_FMT(second_stem)));
   TEST_CHECK(log.errors == 2);

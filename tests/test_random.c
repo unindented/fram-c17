@@ -17,6 +17,7 @@
 #include "shared/buf.h"
 #include "shared/log.h"
 #include "shared/str.h"
+#include "test_jpeg_fixture.h"
 #include "test_support.h"
 
 /** Generated cases each property runs. */
@@ -422,13 +423,9 @@ struct BaseJpeg {
  * @param rng      Generator to draw from. Must not be `NULL`.
  * @param arena    Arena that owns the bytes. Must not be `NULL`.
  * @param base_out Receives the JPEG on success. Must not be `NULL`.
- * @param log      Log that receives an encoder failure. Must not be `NULL`.
  * @return `0` on success, or `-1` when the encode fails or writes no frame header.
  */
-static int build_base_jpeg(struct TestRng* rng,
-                           struct Arena* arena,
-                           struct BaseJpeg* base_out,
-                           struct Log* log) {
+static int build_base_jpeg(struct TestRng* rng, struct Arena* arena, struct BaseJpeg* base_out) {
   enum { BASE_SIDE_MAX = 24 };
   unsigned char pixels[BASE_SIDE_MAX * BASE_SIDE_MAX * IMAGE_CHANNEL_COUNT];
   const ptrdiff_t width = 1 + test_rng_below(rng, BASE_SIDE_MAX);
@@ -438,8 +435,8 @@ static int build_base_jpeg(struct TestRng* rng,
   }
   const struct Image image = {pixels, width, height};
   struct Str bytes = {0};
-  if (image_encode_jpeg(&image, 50 + test_rng_below(rng, 51), arena, &bytes, S("failed to encode"),
-                        SOURCE_PATH, log) != 0) {
+  if (test_jpeg_encode_image(&image, TEST_JPEG_BASELINE, 50 + test_rng_below(rng, 51), arena,
+                             &bytes) != 0) {
     return -1;
   }
   const unsigned char* data = (const unsigned char*)bytes.data;
@@ -471,12 +468,9 @@ static void test_image_probe_survives_mutated_headers(void) {
   const struct Arena log_block = test_arena();
   struct BaseJpeg bases[BASE_COUNT];
   for (ptrdiff_t b = 0; b < BASE_COUNT; b++) {
-    struct Arena log_arena = log_block;
-    struct Log log = {.buf = {.arena = &log_arena}};
-    if (!TEST_CHECK_(build_base_jpeg(&rng, &base_arena, &bases[b], &log) == 0,
+    if (!TEST_CHECK_(build_base_jpeg(&rng, &base_arena, &bases[b]) == 0,
                      "base JPEG %td encodes with a frame header", b)) {
-      const struct Str log_text = buf_str(&log.buf);
-      TEST_MSG("seed %" PRIu64 ", log: '%.*s'", seed, STR_FMT(log_text));
+      TEST_MSG("seed %" PRIu64, seed);
       return;
     }
   }

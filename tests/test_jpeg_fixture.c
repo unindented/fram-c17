@@ -58,6 +58,21 @@ static int test_jpeg_encode_run(struct TestJpegEncoder* encoder,
  */
 static void test_jpeg_error_exit(j_common_ptr common) __attribute__((noreturn, nonnull(1)));
 
+int test_jpeg_encode(ptrdiff_t width_px,
+                     ptrdiff_t height_px,
+                     struct Arena* arena,
+                     struct Str* jpeg_out) {
+  const ptrdiff_t pixel_len = width_px * height_px * IMAGE_CHANNEL_COUNT;
+  struct Image image = {
+      .pixels = image_alloc((size_t)pixel_len), .width_px = width_px, .height_px = height_px};
+  for (ptrdiff_t i = 0; i < pixel_len; i++) {
+    image.pixels[i] = (unsigned char)((i * 37) % 251);
+  }
+  const int rc = test_jpeg_encode_image(&image, TEST_JPEG_BASELINE, 90, arena, jpeg_out);
+  image_free(&image);
+  return rc;
+}
+
 int test_jpeg_encode_image(const struct Image* image,
                            enum TestJpegKind kind,
                            ptrdiff_t quality,

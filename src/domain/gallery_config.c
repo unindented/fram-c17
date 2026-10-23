@@ -749,9 +749,10 @@ static int copy_derivatives_entry(struct Str name,
     rc = -1;
   }
   const struct GalleryConfigIntKey integers[] = {
-      {"width", &derivative_out->width_px, 1, IMAGE_DIMENSION_MAX, "image dimension", true},
-      {"height", &derivative_out->height_px, 1, IMAGE_DIMENSION_MAX, "image dimension", true},
-      {"quality", &derivative_out->quality, 1, 100, "JPEG quality", true},
+      {"width", &derivative_out->width_px, 1, IMAGE_ENCODED_DIMENSION_MAX, "WebP dimension", true},
+      {"height", &derivative_out->height_px, 1, IMAGE_ENCODED_DIMENSION_MAX, "WebP dimension",
+       true},
+      {"quality", &derivative_out->quality, 1, 100, "WebP quality", true},
   };
   for (ptrdiff_t i = 0; i < (ptrdiff_t)(sizeof(integers) / sizeof(integers[0])); i++) {
     if (copy_size(entry_table, key_prefix, &integers[i], log) != 0) {

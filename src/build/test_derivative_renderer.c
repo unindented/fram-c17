@@ -8,7 +8,6 @@
 #include "build/job.h"
 #include "build/test_derivative_renderer.h"
 #include "build/test_job_arenas.h"
-#include "build/test_jpeg.h"
 #include "core/error.h"
 #include "domain/gallery_config.h"
 #include "domain/media_item.h"
@@ -22,6 +21,7 @@
 #include "shared/str.h"
 #include "test_jpeg_fixture.h"
 #include "test_support.h"
+#include "test_webp_output.h"
 
 // Every test here runs against the in-memory host: an image job reads its source and writes its
 // outputs only through `runtime/os.h`. The video case, whose frame is a file `ffmpeg` writes on the
@@ -53,9 +53,7 @@ static int make_oriented_jpeg(struct Arena* arena, struct Str* jpeg_out) {
   }
   const struct Image image = {.pixels = pixels, .width_px = WIDTH, .height_px = HEIGHT};
   struct Str encoded = {0};
-  struct Log log = test_log();
-  if (image_encode_jpeg(&image, 100, arena, &encoded, S("failed to encode fixture"),
-                        S("fixture.jpg"), &log) != 0) {
+  if (test_jpeg_encode_image(&image, TEST_JPEG_BASELINE, 100, arena, &encoded) != 0) {
     return -1;
   }
   if (encoded.len < 2) {
@@ -91,11 +89,11 @@ static void init_item(struct MediaItem* item,
                       struct Arena* arena) {
   struct MediaDerivative* derivatives = arena_new(arena, 3, struct MediaDerivative);
   derivatives[0] = (struct MediaDerivative){
-      .name = S("s"), .path = S("public/s.jpg"), .width_px = 2, .height_px = 2};
+      .name = S("s"), .path = S("public/s.webp"), .width_px = 2, .height_px = 2};
   derivatives[1] = (struct MediaDerivative){
-      .name = S("m"), .path = S("public/m.jpg"), .width_px = 8, .height_px = 4};
+      .name = S("m"), .path = S("public/m.webp"), .width_px = 8, .height_px = 4};
   derivatives[2] = (struct MediaDerivative){
-      .name = S("l"), .path = S("public/l.jpg"), .width_px = 8, .height_px = 4};
+      .name = S("l"), .path = S("public/l.webp"), .width_px = 8, .height_px = 4};
   *item = (struct MediaItem){
       .source_path = str_concat(S("photos/"), str_from_cstr(name), arena),
       .title = str_clone(str_from_cstr(name), arena),
@@ -126,7 +124,7 @@ static void relocate_item_outputs(struct MediaItem* item,
                                   struct Arena* arena) {
   for (ptrdiff_t i = 0; i < item->derivative_count; i++) {
     struct Buf path = {.arena = arena};
-    buf_printf(&path, "%s/%s-%.*s.jpg", output_dir, stem, STR_FMT(item->derivatives[i].name));
+    buf_printf(&path, "%s/%s-%.*s.webp", output_dir, stem, STR_FMT(item->derivatives[i].name));
     item->derivatives[i].path = buf_str(&path);
   }
   struct Buf path = {.arena = arena};
@@ -135,14 +133,14 @@ static void relocate_item_outputs(struct MediaItem* item,
 }
 
 /**
- * @brief Reads one generated JPEG and probes its dimensions, recording why when it cannot.
+ * @brief Reads one generated WebP and decodes its dimensions, recording why when it cannot.
  *
- * @param path       JPEG file to read.
+ * @param path       WebP file to read.
  * @param os         Host holding the file. Must not be `NULL`.
  * @param scratch    Arena for the file bytes.
  * @param width_out  Receives the width in pixels on success. Must not be `NULL`.
  * @param height_out Receives the height in pixels on success. Must not be `NULL`.
- * @return `0` on success, or `-1` when the file cannot be read or probed.
+ * @return `0` on success, or `-1` when the file cannot be read or decoded.
  */
 static int probe_file(struct Str path,
                       struct Os* os,
@@ -151,15 +149,14 @@ static int probe_file(struct Str path,
                       ptrdiff_t* height_out) {
   struct Str data = {0};
   struct Log log = test_log();
-  struct ImageHeader header;
-  const int rc =
-      os_read(os, path, TEST_FILE_LEN_MAX, &scratch, &data, S("failed to read output"), &log) == 0
-          ? image_probe(data, &header, S("failed to probe output"), path, &log)
-          : -1;
+  struct Image decoded = {0};
+  int rc = os_read(os, path, TEST_FILE_LEN_MAX, &scratch, &data, S("failed to read output"), &log);
   if (rc == 0) {
-    *width_out = header.width_px;
-    *height_out = header.height_px;
+    rc = test_webp_decode(data, &decoded);
   }
+  *width_out = decoded.width_px;
+  *height_out = decoded.height_px;
+  image_free(&decoded);
   const struct Str failure = buf_str(&log.buf);
   TEST_MSG("%.*s", STR_FMT(failure));
   return rc;
@@ -239,9 +236,8 @@ static void check_generate_applies_orientation(ptrdiff_t source_len) {
 
   TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
   struct Str output = {0};
-  TEST_CHECK(os_memory_file(os, "public/l.jpg", &output) == 0);
-  TEST_CHECK(image_decode(output, IMAGE_SCALE_FULL, &decoded, S("failed to decode output"),
-                          S("output.jpg"), &log) == 0);
+  TEST_CHECK(os_memory_file(os, "public/l.webp", &output) == 0);
+  TEST_CHECK(test_webp_decode(output, &decoded) == 0);
   if (TEST_CHECK(decoded.width_px == 8 && decoded.height_px == 16)) {
     const ptrdiff_t top = (2 * decoded.width_px + 4) * IMAGE_CHANNEL_COUNT;
     const ptrdiff_t bottom = (13 * decoded.width_px + 4) * IMAGE_CHANNEL_COUNT;
@@ -341,9 +337,8 @@ static void test_generate_decodes_large_source_scaled(void) {
   TEST_CHECK(width == 2 && height == 2);
   struct Str output = {0};
   struct Image decoded = {0};
-  TEST_CHECK(os_memory_file(os, "public/l.jpg", &output) == 0);
-  TEST_ASSERT(image_decode(output, IMAGE_SCALE_FULL, &decoded, S("failed to decode output"),
-                           S("output.jpg"), &log) == 0);
+  TEST_CHECK(os_memory_file(os, "public/l.webp", &output) == 0);
+  TEST_ASSERT(test_webp_decode(output, &decoded) == 0);
   if (TEST_CHECK(decoded.width_px == 8 && decoded.height_px == 4)) {
     const ptrdiff_t left = (2 * decoded.width_px + 1) * IMAGE_CHANNEL_COUNT;
     const ptrdiff_t right = (2 * decoded.width_px + 6) * IMAGE_CHANNEL_COUNT;
@@ -402,7 +397,7 @@ static void test_generate_refreshes_outputs_independently(void) {
   TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
   struct OsStat thumb_before;
   TEST_CHECK(os_stat(os, item.derivatives[0].path, &thumb_before) == 0);
-  os_memory_write(os, "public/l.jpg", "");
+  os_memory_write(os, "public/l.webp", "");
   os_memory_write(os, "public/original.bin", "x");
   TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
 
@@ -435,7 +430,7 @@ static void test_generate_avoids_decode_when_derivatives_fresh(void) {
 
   char* invalid = arena_new(&arena, jpeg.len, char);
   os_memory_write_bytes(os, item.source_path, (struct Str){invalid, jpeg.len});
-  static const char* const outputs[] = {"public/s.jpg", "public/m.jpg", "public/l.jpg",
+  static const char* const outputs[] = {"public/s.webp", "public/m.webp", "public/l.webp",
                                         "public/original.bin"};
   for (size_t i = 0; i < sizeof(outputs) / sizeof(outputs[0]); i++) {
     os_memory_touch(os, outputs[i]);
@@ -580,15 +575,15 @@ static void test_derivative_write_follows_symlink(void) {
   }
   os_memory_write_bytes(os, item.source_path, jpeg);
   // An empty target is stale, so the build regenerates the derivative behind the link.
-  os_memory_write(os, "elsewhere/l.jpg", "");
+  os_memory_write(os, "elsewhere/l.webp", "");
   os_memory_mkdir(os, "public");
-  os_memory_symlink(os, "../elsewhere/l.jpg", "public/l.jpg");
+  os_memory_symlink(os, "../elsewhere/l.webp", "public/l.webp");
 
   TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
   ptrdiff_t width = 0;
   ptrdiff_t height = 0;
-  TEST_CHECK(probe_file(S("elsewhere/l.jpg"), os, arena, &width, &height) == 0);
+  TEST_CHECK(probe_file(S("elsewhere/l.webp"), os, arena, &width, &height) == 0);
   TEST_CHECK(width == 8 && height == 4);
 }
 
@@ -611,16 +606,16 @@ static void test_failed_derivative_write_is_regenerated(void) {
     return;
   }
   os_memory_write_bytes(os, item.source_path, jpeg);
-  os_memory_fail(os, OS_MEMORY_OP_WRITE_DATA, "public/l.jpg", ENOSPC);
+  os_memory_fail(os, OS_MEMORY_OP_WRITE_DATA, "public/l.webp", ENOSPC);
 
   TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == -1);
   char reason[ERROR_SYSTEM_MESSAGE_SIZE];
-  TEST_CHECK(test_log_is(&log, "failed to write derivative 'l': %s ('public/l.jpg')\n",
+  TEST_CHECK(test_log_is(&log, "failed to write derivative 'l': %s ('public/l.webp')\n",
                          error_system_message(reason, sizeof(reason), ENOSPC)));
   struct OsStat thumb_before;
   TEST_CHECK(os_stat(os, item.derivatives[0].path, &thumb_before) == 0);
 
-  os_memory_fail(os, OS_MEMORY_OP_WRITE_DATA, "public/l.jpg", 0);
+  os_memory_fail(os, OS_MEMORY_OP_WRITE_DATA, "public/l.webp", 0);
   log = test_log();
   TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));

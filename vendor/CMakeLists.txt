@@ -373,8 +373,8 @@ add_library(fram_vendor_stb STATIC stb/stb.c)
 target_include_directories(
   fram_vendor_stb SYSTEM PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/stb>"
 )
-# `stb.c` routes stb's allocator hooks to `image_alloc` in `src/formats/image.c`, so it includes that
-# module's header, which includes sharedstuff's `str.h`.
+# `stb.c` routes the resizer's allocator hooks to `image_alloc` in `src/formats/image.c`, so it
+# includes that module's header, which includes sharedstuff's `str.h`.
 target_include_directories(fram_vendor_stb PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
 add_library(
@@ -399,14 +399,3 @@ foreach(target IN ITEMS fram_vendor_libjpeg_turbo fram_vendor_libwebp fram_vendo
   target_compile_options(${target} PRIVATE $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-w>)
   target_link_libraries(${target} PRIVATE fram_build_vendor)
 endforeach()
-
-# stb_image_write's JPEG bit buffer deliberately shifts through the sign bit. UBSan diagnoses the
-# shift even though the result is valid. Keep the exception on this pinned vendor translation unit
-# only. All first-party callers remain fully instrumented.
-if(FRAM_SANITIZER STREQUAL "address")
-  set_property(
-    SOURCE stb/stb.c
-    APPEND
-    PROPERTY COMPILE_OPTIONS $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-fno-sanitize=shift>
-  )
-endif()

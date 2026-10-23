@@ -42,7 +42,6 @@ set(fram_owned_sources
     "${PROJECT_SOURCE_DIR}/src/build/test_derivative_renderer_video.c"
     "${PROJECT_SOURCE_DIR}/src/build/test_job.c"
     "${PROJECT_SOURCE_DIR}/src/build/test_job_arenas.h"
-    "${PROJECT_SOURCE_DIR}/src/build/test_jpeg.h"
     "${PROJECT_SOURCE_DIR}/src/build/test_manifest_builder.c"
     "${PROJECT_SOURCE_DIR}/src/build/test_output_path.c"
     "${PROJECT_SOURCE_DIR}/src/build/test_page_renderer.c"
@@ -118,6 +117,8 @@ set(fram_owned_sources
     "${PROJECT_SOURCE_DIR}/tests/test_support.c"
     "${PROJECT_SOURCE_DIR}/tests/test_support.h"
     "${PROJECT_SOURCE_DIR}/tests/test_test_support.c"
+    "${PROJECT_SOURCE_DIR}/tests/test_webp_output.c"
+    "${PROJECT_SOURCE_DIR}/tests/test_webp_output.h"
 )
 set(fram_configured_c_source "${PROJECT_SOURCE_DIR}/src/core/fram_version.c.in")
 

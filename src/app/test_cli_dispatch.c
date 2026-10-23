@@ -10,7 +10,6 @@
 
 #include "app/cli_dispatch.h"
 #include "app/exit_code.h"
-#include "build/test_jpeg.h"
 #include "core/fram_version.h"
 #include "core/path.h"
 #include "runtime/fs.h"
@@ -18,6 +17,7 @@
 #include "shared/arena.h"
 #include "shared/log.h"
 #include "shared/str.h"
+#include "test_jpeg_fixture.h"
 #include "test_support.h"
 
 /**

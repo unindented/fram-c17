@@ -9,7 +9,6 @@
 #include "app/cmd_build.h"
 #include "app/exit_code.h"
 #include "build/job.h"
-#include "build/test_jpeg.h"
 #include "core/path_list.h"
 #include "formats/image.h"
 #include "os_memory.h"
@@ -19,6 +18,7 @@
 #include "shared/buf.h"
 #include "shared/log.h"
 #include "shared/str.h"
+#include "test_jpeg_fixture.h"
 #include "test_support.h"
 
 // Every build here runs against the in-memory host, whose root is the working directory the build
@@ -218,8 +218,8 @@ static void test_writes_exactly_manifest_outputs(void) {
   struct Os* os = os_memory();
   static const char* const expected[] = {
       "public/_fram/originals/album/one-jpg.jpg",
-      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.jpg",
-      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.jpg",
+      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.webp",
+      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.webp",
       "public/album/index.html",
       "public/fram.css",
       "public/index.html",
@@ -259,8 +259,8 @@ static void test_tolerates_trailing_slash_on_input_dir(void) {
   // No output, page, derivative or original, carries the name of `input_dir`.
   static const char* const expected[] = {
       "public/_fram/originals/album/one-jpg.jpg",
-      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.jpg",
-      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.jpg",
+      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.webp",
+      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.webp",
       "public/album/index.html",
       "public/index.html",
   };
@@ -764,7 +764,7 @@ static void test_rejects_colliding_source_names(void) {
       test_log_is(&log,
                   "duplicate output path for 'photos/album/cafc3a9.jpg' and "
                   "'photos/album/caf\xC3\xA9.jpg': "
-                  "'public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/cafc3a9-jpg-s.jpg'\n"));
+                  "'public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/cafc3a9-jpg-s.webp'\n"));
   TEST_CHECK(log.errors == 1);
   TEST_CHECK(!os_memory_has_path(os, "public"));
 }
@@ -870,7 +870,7 @@ static void test_reports_every_independent_error(void) {
                          "with 0x6e 0x6f ('photos/album/bad-b.jpg')\n"
                          "duplicate output path for 'photos/album/cafc3a9.jpg' and "
                          "'photos/album/caf\xC3\xA9.jpg': "
-                         "'public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/cafc3a9-jpg-s.jpg'\n"
+                         "'public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/cafc3a9-jpg-s.webp'\n"
                          "duplicate output path for 'photos' and 'static/index.html': "
                          "'public/index.html'\n"));
   TEST_CHECK(log.errors == 5);

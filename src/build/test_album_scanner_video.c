@@ -14,7 +14,6 @@
 #include "build/job.h"
 #include "build/test_album_scanner.h"
 #include "build/test_job_arenas.h"
-#include "build/test_jpeg.h"
 #include "core/path.h"
 #include "domain/gallery_config.h"
 #include "domain/media_item.h"
@@ -26,6 +25,7 @@
 #include "shared/buf.h"
 #include "shared/log.h"
 #include "shared/str.h"
+#include "test_jpeg_fixture.h"
 #include "test_support.h"
 
 // The video cases of the probe phase. `ffprobe` and `ffmpeg` are fake scripts on `PATH`, and the

@@ -86,18 +86,6 @@ libwebp also comes with this additional grant of patent rights:
 
 Google hereby grants to you a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable (except as stated in this section) patent license to make, have made, use, offer to sell, sell, import, transfer, and otherwise run, modify and propagate the contents of these implementations of WebM, where such license applies only to those patent claims, both currently owned by Google and acquired in the future, licensable by Google that are necessarily infringed by these implementations of WebM. This grant does not include claims that would be infringed only as a consequence of further modification of these implementations. If you or your agent or exclusive licensee institute or order or agree to the institution of patent litigation or any other patent enforcement activity against any entity (including a cross-claim or counterclaim in a lawsuit) alleging that any of these implementations of WebM or any code incorporated within any of these implementations of WebM constitute direct or contributory patent infringement, or inducement of patent infringement, then any patent rights granted to you under this License for these implementations of WebM shall terminate as of the date such litigation is filed.
 
-### stb (https://github.com/nothings/stb)
-
-Vendored at commit `2c980bb59875b0d32144a71867fbdebb2f77cd20`.
-
-Copyright (c) 2017 Sean Barrett
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
 ### stb_image_resize (https://github.com/nothings/stb_image_resize)
 
 Vendored at commit `2768987dbd7119eb840104b7a3f96ff09d21a7b4`.

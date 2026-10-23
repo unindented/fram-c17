@@ -243,7 +243,7 @@ static void reverse_media(struct MediaItem** media, ptrdiff_t media_count);
 static void reverse_albums(struct Album** albums, ptrdiff_t album_count);
 
 /**
- * @brief Builds the `<slug>-<name>.jpg` filename for one derivative.
+ * @brief Builds the `<slug>-<name>.webp` filename for one derivative.
  *
  * @param slug            Slugified source basename, without its extension.
  * @param derivative_name Configured derivative name.
@@ -713,7 +713,7 @@ static struct Str make_derivative_name(struct Str slug,
                                        struct Str derivative_name,
                                        struct Arena* arena) {
   const struct Str stem = str_concat(slug, S("-"), arena);
-  return str_concat(str_concat(stem, derivative_name, arena), S(".jpg"), arena);
+  return str_concat(str_concat(stem, derivative_name, arena), S(".webp"), arena);
 }
 
 static struct Str make_album_slug_path(struct Str source_dir,

@@ -899,15 +899,15 @@ static void test_load_rejects_integer_upper_bounds(void) {
   char toml_extra[256];
   TEST_ASSERT(snprintf(toml_extra, sizeof(toml_extra),
                        "derivatives = { l = { width = %d, height = 1, quality = 85 } }\n",
-                       IMAGE_DIMENSION_MAX + 1) > 0);
+                       IMAGE_ENCODED_DIMENSION_MAX + 1) > 0);
   char expected[EXPECTED_SIZE];
   TEST_ASSERT(snprintf(expected, sizeof(expected),
-                       "config key 'derivatives.l.width' exceeds max image dimension (%d) at %d",
-                       IMAGE_DIMENSION_MAX, IMAGE_DIMENSION_MAX + 1) > 0);
+                       "config key 'derivatives.l.width' exceeds max WebP dimension (%d) at %d",
+                       IMAGE_ENCODED_DIMENSION_MAX, IMAGE_ENCODED_DIMENSION_MAX + 1) > 0);
   check_load_rejects(toml_extra, expected);
 
   check_load_rejects("derivatives = { l = { width = 1, height = 1, quality = 101 } }\n",
-                     "config key 'derivatives.l.quality' exceeds max JPEG quality (100) at 101");
+                     "config key 'derivatives.l.quality' exceeds max WebP quality (100) at 101");
   // `VIDEO_FRAME_SECONDS_MAX` is file-local to `gallery_config.c`, so the one day below is spelled
   // out and must change with it.
   check_load_rejects("video_frame_seconds = 86401\n",
@@ -920,12 +920,13 @@ static void test_load_rejects_dimension_product_overflow(void) {
   char toml_extra[256];
   TEST_ASSERT(snprintf(toml_extra, sizeof(toml_extra),
                        "derivatives = { huge = { width = %d, height = %d, quality = 85 } }\n",
-                       IMAGE_DIMENSION_MAX, IMAGE_DIMENSION_MAX) > 0);
+                       IMAGE_ENCODED_DIMENSION_MAX, IMAGE_ENCODED_DIMENSION_MAX) > 0);
   char expected[EXPECTED_SIZE];
   TEST_ASSERT(snprintf(expected, sizeof(expected),
                        "config key 'derivatives.huge' dimensions exceed max pixel count (%d "
                        "pixels) at %d x %d",
-                       IMAGE_PIXEL_COUNT_MAX, IMAGE_DIMENSION_MAX, IMAGE_DIMENSION_MAX) > 0);
+                       IMAGE_PIXEL_COUNT_MAX, IMAGE_ENCODED_DIMENSION_MAX,
+                       IMAGE_ENCODED_DIMENSION_MAX) > 0);
   check_load_rejects(toml_extra, expected);
 }
 
