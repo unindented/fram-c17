@@ -12,6 +12,7 @@ RUN apt-get update \
       "gcc-${GCC_VERSION}" \
       libc6-dev \
       make \
+      nasm \
       ninja-build \
       wget \
     && rm -rf /var/lib/apt/lists/*

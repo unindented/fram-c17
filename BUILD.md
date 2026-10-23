@@ -37,6 +37,8 @@ Source directories group code by function. Apart from the host implementation, t
 
 The pinned stb implementation has its own translation unit. It restricts decoding to JPEG, keeps decoder errors in thread-local storage for concurrent derivative workers, and keeps vendor warnings separate from first-party compilation.
 
+libjpeg-turbo builds from the source list its own build uses, with the configuration headers in `vendor/libjpeg-turbo/config/` in place of the ones that build generates. Its SIMD routines are compiled for x86-64, from NASM sources, and for AArch64, from Neon intrinsics. Any other target uses the C routines. An x86-64 build therefore needs NASM. The NASM sources form the object library `fram_vendor_libjpeg_turbo_simd`, because the vendored-code profile's options are for the C compiler, and NASM rejects them.
+
 ### Generated dependency graph
 
 CMake generates this graph from the `release` preset. The graph shows CMake targets and link relationships. It does not show dependencies between source modules. Graph options remove test-only targets, such as the in-memory host `fram_os_memory`.

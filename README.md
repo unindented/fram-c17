@@ -180,6 +180,7 @@ The repository and release archives do not include starter templates or static f
 ### Prerequisites
 
 - POSIX-like system with CMake 3.25 or later, a C17 compiler such as Clang or GCC, and pthreads.
+- NASM on x86-64, for libjpeg-turbo's SIMD routines.
 - `ffmpeg` and `ffprobe` for MP4 galleries and the golden test.
 - Optional build tools: `ninja` for the multi-config portability check.
 - Optional quality tools: `clang-format`, `clang-tidy`, `cppcheck`.
@@ -189,6 +190,7 @@ Vendored dependencies are included under `vendor/`:
 - [`sharedstuff`](https://github.com/unindented/sharedstuff-c17): Arena allocation, counted strings, output buffers, and the diagnostic log.
 - [`copt`](https://github.com/fardaniqbal/copt): Command line option parsing.
 - [`tomlc17`](https://github.com/cktan/tomlc17): TOML configuration parsing.
+- [`libjpeg-turbo`](https://github.com/libjpeg-turbo/libjpeg-turbo): JPEG codec.
 - [`stb`](https://github.com/nothings/stb): JPEG decoding and encoding.
 - [`stb_image_resize`](https://github.com/nothings/stb_image_resize): Image resizing.
 - [`mustache4c`](https://github.com/mity/mustache4c): Mustache template rendering.
