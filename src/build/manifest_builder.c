@@ -398,7 +398,7 @@ static int register_template_output(struct Manifest* manifest,
  * @param perm         Arena that owns the manifest's entries. Must not be `NULL`.
  * @param scratch      Arena for the joined output paths during registration.
  * @param log          Log that receives every error. Must not be `NULL`.
- * @return `0` on success, or `-1` when any path is not below `static_dir`, is oversize or collides.
+ * @return `0` on success, or `-1` when any path is oversize or collides.
  */
 static int register_static_list(struct Manifest* manifest,
                                 const struct PathList* static_paths,

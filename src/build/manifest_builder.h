@@ -98,8 +98,7 @@ int manifest_builder_check_output_dir(const struct GalleryConfig* gallery_config
  *                       fails, so each collision is reported in one run. Must not be `NULL`.
  * @return `0` when every output path is unique, stays out of every input tree, overwrites no input,
  *         and nests under no other, or `-1` on an output inside an input tree, a duplicate, a
- *         prefix collision, an input overwrite, an oversize path, a static file outside
- *         `static_dir`, or a failed template walk.
+ *         prefix collision, an input overwrite, an oversize path, or a failed template walk.
  */
 int manifest_builder_populate(struct Manifest* manifest,
                               const struct GalleryConfig* gallery_config,

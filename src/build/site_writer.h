@@ -74,8 +74,7 @@ int site_writer_write_aggregates(const struct GalleryConfig* gallery_config,
  *
  * @param gallery_config Configuration supplying `output_dir` and `static_dir`. Must not be `NULL`.
  * @param static_paths   Every enumerated file below `static_dir`, each already accepted by
- *                       `manifest_builder_populate`, which rejects a path outside `static_dir`.
- *                       Must not be `NULL`.
+ *                       `manifest_builder_populate`. Must not be `NULL`.
  * @param os             Host the static files are read from and copied to. Must not be `NULL`.
  * @param scratch        Arena for each output path.
  * @param log            Log that receives the first failure, which names the path that could not be
