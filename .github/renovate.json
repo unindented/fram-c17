@@ -5,5 +5,29 @@
   "schedule": ["after 8pm every weekday", "every weekend"],
   "automergeType": "pr",
   "platformAutomerge": true,
-  "rebaseWhen": "conflicted"
+  "rebaseWhen": "conflicted",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "Track vendored libraries that THIRD_PARTY_NOTICES.md records by release.",
+      "managerFilePatterns": ["/^THIRD_PARTY_NOTICES\\.md$/"],
+      "matchStrings": [
+        "### (?<depName>\\S+) \\((?<packageName>https://[^)\\s]+)\\)\\n\\nVendored at release `(?<currentValue>[^`]+)`"
+      ],
+      "datasourceTemplate": "git-tags"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "A vendored release needs its sources replaced by hand, so its update is a reminder, never merged as is.",
+      "matchManagers": ["custom.regex"],
+      "matchDatasources": ["git-tags"],
+      "extractVersion": "^v?(?<version>\\d+\\.\\d+\\.\\d+)$",
+      "allowedVersions": "!/\\.9\\d$/",
+      "automerge": false,
+      "prBodyNotes": [
+        "This updates only the release recorded in `THIRD_PARTY_NOTICES.md`. Before merging, replace the vendored sources under `vendor/` with that release, and update the commit recorded next to it."
+      ]
+    }
+  ]
 }
