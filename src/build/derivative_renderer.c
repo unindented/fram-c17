@@ -32,10 +32,10 @@
  * Largest total of decode and derivative-write memory, in bytes, that derivative jobs hold at once,
  * across every worker.
  *
- * A job holds this memory from the start of its decode to the end of its last derivative write,
- * and it grows with the dimensions the source declares rather than with its file size: a JPEG of a
- * few hundred bytes can declare `IMAGE_PIXEL_COUNT_MAX` pixels. One job per worker would multiply
- * that by the core count. At least two of the largest decodes fit, whatever the worker count, and
+ * A job holds this memory from the start of its decode to the end of its last derivative write, and
+ * it grows with the dimensions the source declares rather than with its file size: a JPEG of a few
+ * hundred bytes can declare `IMAGE_PIXEL_COUNT_MAX` pixels. One job per worker would multiply that
+ * by the core count. At least two of the largest decodes fit, whatever the worker count, and
  * smaller sources share the budget accordingly. The decoded pixels decision in `ARCHITECTURE.md`
  * gives the measured peaks.
  */

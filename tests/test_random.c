@@ -416,9 +416,9 @@ struct BaseJpeg {
 /**
  * @brief Encodes a small JPEG of random pixels and finds its frame header.
  *
- * The probe reads every segment up to the first scan, and the frame header is the one whose
- * fields it checks against the image limits. Overwrites land only up to the end of the frame
- * header. The Huffman tables and the scan header after it are only ever cut short.
+ * The probe reads every segment up to the first scan, and the frame header is the one whose fields
+ * it checks against the image limits. Overwrites land only up to the end of the frame header. The
+ * Huffman tables and the scan header after it are only ever cut short.
  *
  * @param rng      Generator to draw from. Must not be `NULL`.
  * @param arena    Arena that owns the bytes. Must not be `NULL`.

@@ -161,8 +161,8 @@ static void decoder_read_rows(struct JpegDecoder* decoder, bool is_cmyk, struct 
 /**
  * @brief Formats the library's message for a fatal error and jumps back to `decoder_read`.
  *
- * The library reports a failed allocation as a fatal error, and that one ends the build in
- * `os_oom` instead, like every other failed allocation.
+ * The library reports a failed allocation as a fatal error, and that one ends the build in `os_oom`
+ * instead, like every other failed allocation.
  *
  * @param common The codec, whose `client_data` is its `struct JpegDecoder`. Must not be `NULL`.
  */

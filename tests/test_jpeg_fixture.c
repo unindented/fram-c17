@@ -13,9 +13,9 @@
 #include "jpeglib.h"
 
 /**
- * One run of the encoder, which the library reaches through `client_data`.
- * `test_jpeg_encode_run` calls `setjmp`, so the state it changes lives in its caller's frame, where
- * the jump back leaves its value defined.
+ * One run of the encoder, which the library reaches through `client_data`. `test_jpeg_encode_run`
+ * calls `setjmp`, so the state it changes lives in its caller's frame, where the jump back leaves
+ * its value defined.
  */
 struct TestJpegEncoder {
   /** The library's compression state. */
@@ -53,8 +53,7 @@ static int test_jpeg_encode_run(struct TestJpegEncoder* encoder,
 /**
  * @brief Records the library's message for a fatal error and jumps back to the encoder.
  *
- * @param common The codec, whose `client_data` is its `struct TestJpegEncoder`. Must not be
- *               `NULL`.
+ * @param common The codec, whose `client_data` is its `struct TestJpegEncoder`. Must not be `NULL`.
  */
 static void test_jpeg_error_exit(j_common_ptr common) __attribute__((noreturn, nonnull(1)));
 
@@ -146,8 +145,8 @@ static int test_jpeg_encode_run(struct TestJpegEncoder* encoder,
         image->pixels + (ptrdiff_t)compress->next_scanline * image->width_px * IMAGE_CHANNEL_COUNT;
     JSAMPROW samples = rgb;
     if (is_cmyk) {
-      // The largest channel is the black, and each color is scaled up to it, so `color * black /
-      // 255` rounds back to the channel.
+      // The largest channel is the black, and each color is scaled up to it, so
+      // `color * black / 255` rounds back to the channel.
       for (ptrdiff_t x = 0; x < image->width_px; x++) {
         const unsigned char* pixel = rgb + x * IMAGE_CHANNEL_COUNT;
         int black = pixel[0] > pixel[1] ? pixel[0] : pixel[1];

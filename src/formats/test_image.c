@@ -440,8 +440,8 @@ static void test_image_probe_rejects_oversized_pixel_count(void) {
                          "20000 x 5001 ('a.jpg')\n"));
 }
 
-// A header the decoder cannot decode is rejected by the probe, with the reason: 12-bit samples,
-// two components, which name no color space, and lossless coding, which cannot be scaled.
+// A header the decoder cannot decode is rejected by the probe, with the reason: 12-bit samples, two
+// components, which name no color space, and lossless coding, which cannot be scaled.
 static void test_image_probe_rejects_unsupported_headers(void) {
   static const unsigned char twelve_bit[] = {
       0xFF, 0xD8, 0xFF, 0xC1, 0x00, 0x0B, 0x0C, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11,

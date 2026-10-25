@@ -62,9 +62,9 @@ int derivative_renderer_generate(const struct GalleryConfig* gallery_config,
  * @brief Returns the scale a source is decoded at to write its stale derivatives.
  *
  * This is the smallest eighth at which every stale derivative's source region, cropped as
- * configured, is still at least twice the derivative in each dimension, so the resizer, and not
- * the decoder's DCT reduction, does the final reduction. A source too small for that at any
- * reduced scale decodes at full size.
+ * configured, is still at least twice the derivative in each dimension, so the resizer, and not the
+ * decoder's DCT reduction, does the final reduction. A source too small for that at any reduced
+ * scale decodes at full size.
  *
  * @param gallery_config Configured derivatives. Must not be `NULL`.
  * @param item           Media item, with one derivative per configured one. Must not be `NULL`.
