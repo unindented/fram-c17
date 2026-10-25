@@ -89,7 +89,9 @@ Tests run `cppcheck`. Tests do not run `clang-tidy` because deliberate failure c
 
 Cross builds do not run either host analyzer. Zig supplies target headers that the host analyzers cannot find when they repeat the compile command.
 
-The `fram_format` and `fram_lint` targets use an explicit list of first-party files. Add each new source or test to its target and this list.
+The `fram_format` and `fram_lint` targets run `clang-format` and then `cwrap`, which refills comment prose to 100 columns, the `.clang-format` column limit. Either tool is skipped when it is not installed. CI and the Linux image install a pinned `cwrap` release.
+
+Both targets use an explicit list of first-party files. Add each new source or test to its target and this list.
 
 This duplication is deliberate. A configure-time glob can omit a new file until CMake configures the project again.
 

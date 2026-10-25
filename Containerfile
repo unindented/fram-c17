@@ -31,6 +31,21 @@ RUN mkdir -p /etc/apt/keyrings \
       "libclang-rt-${LLVM_VERSION}-dev" \
     && rm -rf /var/lib/apt/lists/*
 
+# cwrap has no distribution package, so the image installs a pinned release and checks its digest.
+ARG CWRAP_VERSION=0.3.0
+RUN case "$(uname -m)" in \
+      x86_64) target=x86_64-linux-musl sha256=d75b646758e554718fa870098c15db78cd3eca101ba3d9c0fbb5dd47d2e1d4f4 ;; \
+      aarch64) target=aarch64-linux-musl sha256=1ca0cc597c27eafafbb9650fff21c6bca96f8d0638bf9f1edc82f0b7d8060b42 ;; \
+      *) echo "no cwrap release for $(uname -m)" >&2; exit 1 ;; \
+    esac \
+    && archive="cwrap-${CWRAP_VERSION}-${target}.tar.gz" \
+    && wget --quiet "https://github.com/unindented/cwrap-c17/releases/download/v${CWRAP_VERSION}/${archive}" \
+      --output-document="/tmp/${archive}" \
+    && echo "${sha256}  /tmp/${archive}" | sha256sum --check --quiet \
+    && tar -xzf "/tmp/${archive}" -C /usr/local --strip-components=1 --no-same-owner \
+      "cwrap-${CWRAP_VERSION}-${target}/bin/cwrap" \
+    && rm "/tmp/${archive}"
+
 ENV CC=clang-22
 
 COPY . /src

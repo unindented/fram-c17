@@ -2,7 +2,7 @@
 
 This guide describes the target style for code owned by this repository. It is not a description of the current baseline: existing code that differs from this guide is a deviation to report or fix.
 
-`.clang-format` owns mechanical layout. Do not restate whitespace, wrapping, indentation, brace-placement, or alignment rules here unless they affect meaning.
+`.clang-format` owns mechanical layout, and `cwrap` refills comment prose to the same 100 columns. Do not restate whitespace, wrapping, indentation, brace-placement, or alignment rules here unless they affect meaning.
 
 Vendored code under `vendor/` is out of scope.
 

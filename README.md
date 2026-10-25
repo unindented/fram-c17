@@ -183,7 +183,7 @@ The repository and release archives do not include starter templates or static f
 - NASM on x86-64, for libjpeg-turbo's SIMD routines.
 - `ffmpeg` and `ffprobe` for MP4 galleries and the golden test.
 - Optional build tools: `ninja` for the multi-config portability check.
-- Optional quality tools: `clang-format`, `clang-tidy`, `cppcheck`.
+- Optional quality tools: `clang-format`, `cwrap`, `clang-tidy`, `cppcheck`.
 
 Vendored dependencies are included under `vendor/`:
 

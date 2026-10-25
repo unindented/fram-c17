@@ -15,6 +15,16 @@
         "### (?<depName>\\S+) \\((?<packageName>https://[^)\\s]+)\\)\\n\\nVendored at release `(?<currentValue>[^`]+)`"
       ],
       "datasourceTemplate": "git-tags"
+    },
+    {
+      "customType": "regex",
+      "description": "Track the cwrap release that CI and the Linux image install.",
+      "managerFilePatterns": ["/^\\.github/workflows/checks\\.yml$/", "/^Containerfile$/"],
+      "matchStrings": ["CWRAP_VERSION[:=] ?(?<currentValue>\\d+\\.\\d+\\.\\d+)"],
+      "depNameTemplate": "cwrap",
+      "packageNameTemplate": "unindented/cwrap-c17",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>\\d+\\.\\d+\\.\\d+)$"
     }
   ],
   "packageRules": [
@@ -27,6 +37,14 @@
       "automerge": false,
       "prBodyNotes": [
         "This updates only the release recorded in `THIRD_PARTY_NOTICES.md`. Before merging, replace the vendored sources under `vendor/` with that release, and update the commit recorded next to it."
+      ]
+    },
+    {
+      "description": "A cwrap release needs new digests, so its update is a reminder, never merged as is.",
+      "matchDepNames": ["cwrap"],
+      "automerge": false,
+      "prBodyNotes": [
+        "Before merging, replace the SHA-256 digests next to `CWRAP_VERSION` in `.github/workflows/checks.yml` and `Containerfile` with the ones in the release's `SHA256SUMS`."
       ]
     }
   ]
