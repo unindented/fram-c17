@@ -251,6 +251,35 @@ static void test_no_prefix_collision_among_distinct_files(void) {
   TEST_CHECK(!manifest_find_prefix_collision(&manifest, &collision));
 }
 
+// Iterating the output paths visits each recorded path once, in the order it was recorded, whatever
+// the trie's order, and a rejected duplicate adds nothing. An empty manifest has no path to visit.
+static void test_next_output_path_visits_paths_in_recorded_order(void) {
+  struct Arena arena = test_arena();
+  struct Manifest manifest = {0};
+  struct Str output_path = {0};
+  TEST_CHECK(!manifest_next_output_path(&manifest, &output_path));
+
+  static const struct Str paths[] = {
+      STR_INIT("public/z.html"),
+      STR_INIT("public/a.html"),
+      STR_INIT("public/m/index.html"),
+  };
+  enum { PATH_COUNT = sizeof(paths) / sizeof(paths[0]) };
+  for (ptrdiff_t i = 0; i < PATH_COUNT; i++) {
+    TEST_CHECK(manifest_add(&manifest, paths[i], S("source"), &arena, NULL) == 0);
+  }
+  TEST_CHECK(manifest_add(&manifest, S("public/A.html"), S("source"), &arena, NULL) == -1);
+
+  ptrdiff_t count = 0;
+  while (manifest_next_output_path(&manifest, &output_path)) {
+    TEST_CHECK(count < PATH_COUNT && str_eq(output_path, paths[count]));
+    TEST_MSG("path %td: '%.*s'", count, STR_FMT(output_path));
+    count++;
+  }
+  TEST_CHECK(count == PATH_COUNT);
+  TEST_CHECK(str_eq(output_path, paths[PATH_COUNT - 1]));
+}
+
 TEST_LIST = {
     {"inserts then detects duplicate", test_inserts_then_detects_duplicate},
     {"detects ASCII-folded duplicate", test_detects_ascii_folded_duplicate},
@@ -263,5 +292,7 @@ TEST_LIST = {
      test_detects_prefix_collision_regardless_of_order},
     {"detects every prefix collision", test_detects_every_prefix_collision},
     {"no prefix collision among distinct files", test_no_prefix_collision_among_distinct_files},
+    {"next output path visits paths in recorded order",
+     test_next_output_path_visits_paths_in_recorded_order},
     {NULL, NULL},
 };

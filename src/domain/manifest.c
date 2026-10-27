@@ -151,6 +151,18 @@ bool manifest_find_prefix_collision(const struct Manifest* manifest,
   return false;
 }
 
+bool manifest_next_output_path(const struct Manifest* manifest, struct Str* output_path) {
+  // The previous path is a recorded one, so the lookup finds its entry, as in
+  // `manifest_find_prefix_collision`.
+  const struct ManifestEntry* entry =
+      output_path->data == NULL ? manifest->head : lookup_entry(manifest, *output_path)->next;
+  if (entry == NULL) {
+    return false;
+  }
+  *output_path = entry->output_path;
+  return true;
+}
+
 static struct ManifestEntry* descend_trie(const struct Manifest* manifest,
                                           struct Str output_path,
                                           struct ManifestEntry** parent_out,

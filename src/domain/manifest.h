@@ -112,4 +112,19 @@ bool manifest_find_prefix_collision(const struct Manifest* manifest,
                                     struct ManifestPrefixCollision* collision)
     __attribute__((nonnull(1, 2)));
 
+/**
+ * @brief Finds the recorded output path after `output_path`, in the order the paths were recorded.
+ *
+ * A loop that starts from a zeroed `output_path` and calls this until it returns `false` visits
+ * every recorded path once. The path is borrowed from the manifest and lives as long as its arena.
+ *
+ * @param manifest    Manifest to read. Must not be `NULL`.
+ * @param output_path The path the previous call found, or zeroed for the first call. Receives the
+ *                    next path on a hit, and is untouched on a miss. Must not be `NULL`.
+ * @return `true` and fills `output_path` when a path was recorded after it, or `false` when none
+ *         was.
+ */
+bool manifest_next_output_path(const struct Manifest* manifest, struct Str* output_path)
+    __attribute__((nonnull(1, 2)));
+
 #endif
