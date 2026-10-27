@@ -55,6 +55,9 @@ enum OsMemoryOp {
 
   /** `os_stat` of the path, and its inspection as an entry of a listing. */
   OS_MEMORY_OP_STAT,
+
+  /** `os_remove` or `os_remove_dir` of the path. */
+  OS_MEMORY_OP_REMOVE,
 };
 
 /**

@@ -220,10 +220,11 @@ struct OsSource {
  * a symlink is followed, and a hard link sees the new bytes. The destination's directory needs no
  * write permission when the file already exists.
  *
- * This and `os_mkdirs` are the only operations that change the host, and should stay the only ones.
- * A second writer covering a subset of the outputs gives a caller a choice to get wrong, which is
- * why both sources share this one function, its open, its parents and its messages. Parallel jobs
- * call it at once, for distinct files that may share parent directories.
+ * This, `os_mkdirs`, `os_remove` and `os_remove_dir` are the only operations that change the host,
+ * and should stay the only ones. A second writer covering a subset of the outputs gives a caller a
+ * choice to get wrong, which is why both sources share this one function, its open, its parents and
+ * its messages. Parallel jobs call it at once, for distinct files that may share parent
+ * directories.
  *
  * @param os        Host to write to. Must not be `NULL`.
  * @param file_path Destination path.
@@ -255,6 +256,38 @@ int os_write(struct Os* os,
  * @return `0` on success, or `-1` if a component cannot be created.
  */
 int os_mkdirs(struct Os* os, struct Str dir_path, struct Str operation, struct Log* log)
+    __attribute__((nonnull(1, 4)));
+
+/**
+ * @brief Removes the file or symlink `file_path` names, as `unlink` does.
+ *
+ * A symlink is removed itself, never what it points to, and a file with another name keeps its
+ * bytes under that name. A path that names nothing counts as removed, so a caller that removes what
+ * it listed does not fail on an entry something else removed first.
+ *
+ * @param os        Host to remove from. Must not be `NULL`.
+ * @param file_path Path of the file or symlink to remove.
+ * @param operation Operation leading the failure message, which names `file_path`.
+ * @param log       Log that receives the failure. Must not be `NULL`.
+ * @return `0` on success or when `file_path` names nothing, or `-1` when it names a directory or
+ *         cannot be removed.
+ */
+int os_remove(struct Os* os, struct Str file_path, struct Str operation, struct Log* log)
+    __attribute__((nonnull(1, 4)));
+
+/**
+ * @brief Removes the empty directory `dir_path` names, as `rmdir` does.
+ *
+ * A path that names nothing counts as removed, as it does for `os_remove`.
+ *
+ * @param os        Host to remove from. Must not be `NULL`.
+ * @param dir_path  Path of the directory to remove. A symlink to a directory is not one.
+ * @param operation Operation leading the failure message, which names `dir_path`.
+ * @param log       Log that receives the failure. Must not be `NULL`.
+ * @return `0` on success or when `dir_path` names nothing, or `-1` when it names something other
+ *         than a directory, a directory that is not empty, or one that cannot be removed.
+ */
+int os_remove_dir(struct Os* os, struct Str dir_path, struct Str operation, struct Log* log)
     __attribute__((nonnull(1, 4)));
 
 /**

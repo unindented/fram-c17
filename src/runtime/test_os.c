@@ -878,6 +878,107 @@ static void test_mkdirs_rejects_file_and_dangling_components(void) {
   contract_end(&c);
 }
 
+// `os_remove` removes a file, and a symlink itself rather than what it points to, and a hard link
+// leaves its twin's bytes in place. A path that names nothing, or whose parent is missing, counts
+// as removed.
+static void test_remove_removes_files_and_links(void) {
+  char root[] = "/tmp/fram-os-remove.XXXXXX";
+  struct Contract c;
+  if (contract_begin(root, &c) != 0) {
+    return;
+  }
+  contract_write(&c, "dir/a.md", S("a"));
+  contract_link(&c, "dir/a.md", "twin.md");
+  contract_symlink(&c, "dir/a.md", "file-link");
+  contract_symlink(&c, "dir", "dir-link");
+  struct Log log = test_log();
+  TEST_CHECK(os_remove(c.os, contract_path(&c, "file-link"), S("op"), &log) == 0);
+  TEST_CHECK(os_remove(c.os, contract_path(&c, "dir-link"), S("op"), &log) == 0);
+  TEST_CHECK(os_remove(c.os, contract_path(&c, "twin.md"), S("op"), &log) == 0);
+  TEST_CHECK(os_remove(c.os, contract_path(&c, "missing"), S("op"), &log) == 0);
+  TEST_CHECK(os_remove(c.os, contract_path(&c, "missing/child"), S("op"), &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  struct OsStat st;
+  TEST_CHECK(os_stat(c.os, contract_path(&c, "file-link"), &st) == -1);
+  TEST_CHECK(os_stat(c.os, contract_path(&c, "dir-link"), &st) == -1);
+  TEST_CHECK(os_stat(c.os, contract_path(&c, "twin.md"), &st) == -1);
+  TEST_CHECK(os_stat(c.os, contract_path(&c, "dir"), &st) == 0 && st.is_dir);
+  TEST_CHECK(contract_is_file(&c, "dir/a.md", S("a")));
+
+  TEST_CHECK(os_remove(c.os, contract_path(&c, "dir/a.md"), S("op"), &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(os_stat(c.os, contract_path(&c, "dir/a.md"), &st) == -1);
+  contract_end(&c);
+}
+
+// `os_remove` refuses a directory, with the cause the system gives `unlink`, and a path holding a
+// `NUL` byte.
+static void test_remove_rejects_directory_and_path_with_nul(void) {
+  char root[] = "/tmp/fram-os-remove-fail.XXXXXX";
+  struct Contract c;
+  if (contract_begin(root, &c) != 0) {
+    return;
+  }
+  const struct Str dir_path = contract_path(&c, "dir");
+  struct Log log = test_log();
+  TEST_CHECK(os_mkdirs(c.os, dir_path, S("op"), &log) == 0);
+  TEST_CHECK(os_remove(c.os, dir_path, S("op"), &log) == -1);
+#ifdef __APPLE__
+  const int dir_errno = EPERM;
+#else
+  const int dir_errno = EISDIR;
+#endif
+  TEST_CHECK(test_log_is(&log, "op: %s ('%.*s')\n", strerror(dir_errno), STR_FMT(dir_path)));
+  struct OsStat st;
+  TEST_CHECK(os_stat(c.os, dir_path, &st) == 0 && st.is_dir);
+
+  contract_write(&c, "a.md", S("a"));
+  const struct Str file_path = contract_path(&c, "a.md");
+  log = test_log();
+  TEST_CHECK(os_remove(c.os, str_concat(file_path, S("\0b"), &c.arena), S("op"), &log) == -1);
+  TEST_CHECK(test_log_is(&log, "op: %s ('%.*s')\n", strerror(EINVAL), STR_FMT(file_path)));
+  TEST_CHECK(os_stat(c.os, file_path, &st) == 0);
+  contract_end(&c);
+}
+
+// `os_remove_dir` removes an empty directory, and counts a path that names nothing as removed. It
+// refuses a directory that holds an entry, a file, and a symlink to a directory, which it leaves in
+// place.
+static void test_remove_dir_removes_only_empty_directories(void) {
+  char root[] = "/tmp/fram-os-remove-dir.XXXXXX";
+  struct Contract c;
+  if (contract_begin(root, &c) != 0) {
+    return;
+  }
+  const struct Str empty_dir = contract_path(&c, "empty");
+  struct Log log = test_log();
+  TEST_CHECK(os_mkdirs(c.os, empty_dir, S("op"), &log) == 0);
+  TEST_CHECK(os_remove_dir(c.os, empty_dir, S("op"), &log) == 0);
+  TEST_CHECK(os_remove_dir(c.os, empty_dir, S("op"), &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  struct OsStat st;
+  TEST_CHECK(os_stat(c.os, empty_dir, &st) == -1);
+
+  contract_write(&c, "full/a.md", S("a"));
+  const struct Str full_dir = contract_path(&c, "full");
+  TEST_CHECK(os_remove_dir(c.os, full_dir, S("op"), &log) == -1);
+  TEST_CHECK(test_log_is(&log, "op: %s ('%.*s')\n", strerror(ENOTEMPTY), STR_FMT(full_dir)));
+
+  const struct Str file_path = contract_path(&c, "full/a.md");
+  log = test_log();
+  TEST_CHECK(os_remove_dir(c.os, file_path, S("op"), &log) == -1);
+  TEST_CHECK(test_log_is(&log, "op: %s ('%.*s')\n", strerror(ENOTDIR), STR_FMT(file_path)));
+
+  contract_symlink(&c, "full", "full-link");
+  const struct Str link_path = contract_path(&c, "full-link");
+  log = test_log();
+  TEST_CHECK(os_remove_dir(c.os, link_path, S("op"), &log) == -1);
+  TEST_CHECK(test_log_is(&log, "op: %s ('%.*s')\n", strerror(ENOTDIR), STR_FMT(link_path)));
+  TEST_CHECK(os_stat(c.os, file_path, &st) == 0);
+  TEST_CHECK(os_stat(c.os, link_path, &st) == 0 && st.is_dir);
+  contract_end(&c);
+}
+
 // A listing classifies each entry after following a symlink, and leaves out `.`, `..`, a dangling
 // symlink and a symlink cycle. Its order is not specified, so each entry is looked up by name.
 static void test_list_classifies_entries_and_skips_links_to_nothing(void) {
@@ -1134,6 +1235,9 @@ TEST_LIST = {
     {"mkdirs creates nested and is idempotent", test_mkdirs_creates_nested_and_is_idempotent},
     {"mkdirs rejects file and dangling components",
      test_mkdirs_rejects_file_and_dangling_components},
+    {"remove removes files and links", test_remove_removes_files_and_links},
+    {"remove rejects directory and path with nul", test_remove_rejects_directory_and_path_with_nul},
+    {"remove dir removes only empty directories", test_remove_dir_removes_only_empty_directories},
     {"list classifies entries and skips links to nothing",
      test_list_classifies_entries_and_skips_links_to_nothing},
     {"list rejects missing and file", test_list_rejects_missing_and_file},

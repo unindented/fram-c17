@@ -309,6 +309,25 @@ static void entry_add(struct Os* os, ptrdiff_t dir, struct Str name, ptrdiff_t n
     __attribute__((nonnull(1)));
 
 /**
+ * @brief Returns the entry a lookup ended on, or `NULL` when it ended on a directory itself, as a
+ *        path naming the root or ending in `.` or `..` does.
+ * @param os     Host searched. Must not be `NULL`.
+ * @param lookup Successful lookup. Must not be `NULL`.
+ * @return The entry naming `lookup->node`, or `NULL`.
+ */
+static const struct OsMemoryEntry* entry_of_lookup(struct Os* os,
+                                                   const struct OsMemoryLookup* lookup)
+    __attribute__((nonnull(1, 2)));
+
+/**
+ * @brief Removes one entry, keeping the others in their order.
+ * @param os    Host to change. Must not be `NULL`.
+ * @param entry Entry of `os` to remove. Must not be `NULL`.
+ */
+static void entry_remove(struct Os* os, const struct OsMemoryEntry* entry)
+    __attribute__((nonnull(1, 2)));
+
+/**
  * @brief Returns the `errno` value an injected failure gives `op` on `path`, or `0` for none.
  *
  * @param os   Host to look in. Must not be `NULL`.
@@ -734,6 +753,63 @@ int os_mkdirs(struct Os* os, struct Str dir_path, struct Str operation, struct L
   return rc;
 }
 
+int os_remove(struct Os* os, struct Str file_path, struct Str operation, struct Log* log) {
+  const struct OsMemoryReport report = {operation, log};
+  host_lock(os);
+  struct Arena scratch = os->scratch;
+  struct OsMemoryLookup lookup = {0};
+  int rc = 0;
+  const int fault = fault_find(os, OS_MEMORY_OP_REMOVE, file_path);
+  if (fault != 0) {
+    rc = report_errno(&report, file_path, fault);
+  } else if (tree_lookup(os, file_path, false, &scratch, &lookup) != 0) {
+    // A path that names nothing is already removed, as `unlink` failing with `ENOENT` is.
+    rc = errno == ENOENT ? 0 : report_errno(&report, file_path, errno);
+  } else if (os->nodes[lookup.node].kind == OS_MEMORY_NODE_DIR) {
+    // `unlink` refuses a directory with `EPERM` on macOS and `EISDIR` on Linux.
+#ifdef __APPLE__
+    rc = report_errno(&report, file_path, EPERM);
+#else
+    rc = report_errno(&report, file_path, EISDIR);
+#endif
+  } else {
+    entry_remove(os, entry_of_lookup(os, &lookup));
+  }
+  host_unlock(os);
+  return rc;
+}
+
+int os_remove_dir(struct Os* os, struct Str dir_path, struct Str operation, struct Log* log) {
+  const struct OsMemoryReport report = {operation, log};
+  host_lock(os);
+  struct Arena scratch = os->scratch;
+  struct OsMemoryLookup lookup = {0};
+  int rc = 0;
+  const int fault = fault_find(os, OS_MEMORY_OP_REMOVE, dir_path);
+  if (fault != 0) {
+    rc = report_errno(&report, dir_path, fault);
+  } else if (tree_lookup(os, dir_path, false, &scratch, &lookup) != 0) {
+    rc = errno == ENOENT ? 0 : report_errno(&report, dir_path, errno);
+  } else if (os->nodes[lookup.node].kind != OS_MEMORY_NODE_DIR) {
+    rc = report_errno(&report, dir_path, ENOTDIR);
+  } else if (entry_of_lookup(os, &lookup) == NULL) {
+    // `rmdir` refuses a path ending in `.` with `EINVAL`, and the root is not removable either.
+    rc = report_errno(&report, dir_path, EINVAL);
+  } else {
+    bool is_empty = true;
+    for (ptrdiff_t i = 0; is_empty && i < os->entry_count; i++) {
+      is_empty = os->entries[i].dir != lookup.node;
+    }
+    if (is_empty) {
+      entry_remove(os, entry_of_lookup(os, &lookup));
+    } else {
+      rc = report_errno(&report, dir_path, ENOTEMPTY);
+    }
+  }
+  host_unlock(os);
+  return rc;
+}
+
 int os_list(struct Os* os,
             struct Str dir_path,
             struct Arena* perm,
@@ -997,6 +1073,22 @@ static void entry_add(struct Os* os, ptrdiff_t dir, struct Str name, ptrdiff_t n
                              _Alignof(struct OsMemoryEntry));
   }
   os->entries[os->entry_count++] = (struct OsMemoryEntry){dir, str_clone(name, &os->arena), node};
+}
+
+static const struct OsMemoryEntry* entry_of_lookup(struct Os* os,
+                                                   const struct OsMemoryLookup* lookup) {
+  if (lookup->dir < 0 || lookup->name.len == 0) {
+    return NULL;
+  }
+  const struct OsMemoryEntry* entry = entry_find(os, lookup->dir, lookup->name);
+  return entry != NULL && entry->node == lookup->node ? entry : NULL;
+}
+
+static void entry_remove(struct Os* os, const struct OsMemoryEntry* entry) {
+  const ptrdiff_t index = entry - os->entries;
+  memmove(&os->entries[index], &os->entries[index + 1],
+          (size_t)(os->entry_count - index - 1) * sizeof(*entry));
+  os->entry_count--;
 }
 
 static int fault_find(const struct Os* os, enum OsMemoryOp op, struct Str path) {

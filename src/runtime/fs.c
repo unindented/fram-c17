@@ -391,6 +391,32 @@ int os_mkdirs(struct Os* os, struct Str dir_path, struct Str operation, struct L
   return mkdirs_report(dir_path, &report);
 }
 
+int os_remove(struct Os* os, struct Str file_path, struct Str operation, struct Log* log) {
+  (void)os;
+  const struct FsReport report = {operation, log};
+  char path[PATH_MAX];
+  if (copy_cstr(file_path, path) != 0) {
+    return report_errno(&report, file_path, errno);
+  }
+  if (unlink(path) != 0 && errno != ENOENT) {
+    return report_errno(&report, file_path, errno);
+  }
+  return 0;
+}
+
+int os_remove_dir(struct Os* os, struct Str dir_path, struct Str operation, struct Log* log) {
+  (void)os;
+  const struct FsReport report = {operation, log};
+  char path[PATH_MAX];
+  if (copy_cstr(dir_path, path) != 0) {
+    return report_errno(&report, dir_path, errno);
+  }
+  if (rmdir(path) != 0 && errno != ENOENT) {
+    return report_errno(&report, dir_path, errno);
+  }
+  return 0;
+}
+
 int os_list(struct Os* os,
             struct Str dir_path,
             struct Arena* perm,
