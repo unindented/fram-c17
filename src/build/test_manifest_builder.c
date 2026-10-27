@@ -118,11 +118,33 @@ static void check_rejects_output_dir_in_root(const struct GalleryConfig* gallery
   const char* output_dir = str_cstr(gallery_config->output_dir, &arena);
   const bool had_output_dir = os_memory_has_path(os, output_dir);
   struct Log log = test_log();
-  TEST_CHECK(manifest_builder_check_output_dir(gallery_config, os, test_arena(), &log) == -1);
+  TEST_CHECK(
+      manifest_builder_check_output_dir(gallery_config, CONFIG_PATH, os, test_arena(), &log) == -1);
   TEST_CHECK(test_log_is(&log, "output directory would write inside '%s': '%.*s'\n", root_key,
                          STR_FMT(gallery_config->output_dir)));
   TEST_CHECK(os_memory_has_path(os, output_dir) == had_output_dir);
   TEST_MSG("output_dir: '%s'", output_dir);
+}
+
+/**
+ * @brief Checks that `manifest_builder_check_output_dir` rejects an `output_dir` that holds an
+ *        input.
+ *
+ * @param gallery_config Configuration whose `output_dir` holds an input root or the configuration
+ *                       file. Must not be `NULL`.
+ * @param held           Held input as the diagnostic names it, such as `'input_dir'` or
+ *                       `the config`. Must not be `NULL`.
+ * @param os             Host the fixture is on. Must not be `NULL`.
+ */
+static void check_rejects_output_dir_holding(const struct GalleryConfig* gallery_config,
+                                             const char* held,
+                                             struct Os* os) {
+  struct Log log = test_log();
+  TEST_CHECK(
+      manifest_builder_check_output_dir(gallery_config, CONFIG_PATH, os, test_arena(), &log) == -1);
+  TEST_CHECK(test_log_is(&log, "output directory would hold %s: '%.*s'\n", held,
+                         STR_FMT(gallery_config->output_dir)));
+  TEST_MSG("output_dir: '%.*s'", STR_FMT(gallery_config->output_dir));
 }
 
 // Every album, derivative, original, aggregate, and static file output is registered exactly once.
@@ -205,16 +227,16 @@ static void test_accepts_output_beside_input_roots(void) {
   TEST_CHECK(test_log_is_empty(&log));
 }
 
-// An `output_dir` outside every input root passes the early check whether or not it exists yet.
-// That includes a directory whose name only starts with a root's name, and one that holds the roots
-// rather than lying inside them, which is the `output_dir = "."` layout.
+// An `output_dir` apart from every input root and the configuration file passes the early check
+// whether or not it exists yet. That includes a directory whose name only starts with a root's
+// name.
 static void test_check_output_dir_accepts_dir_outside_input_roots(void) {
   struct GalleryConfig gallery_config;
   struct Os* os = init_manifest_fixture(&gallery_config);
   os_memory_write(os, "gallery/photos/x.jpg", "source");
   os_memory_write(os, "gallery/static/a.css", "static");
+  os_memory_mkdir(os, "gallery/public");
   static const struct Str output_dirs[] = {
-      STR_INIT("gallery"),
       STR_INIT("gallery/public"),
       STR_INIT("gallery/photosx/new"),
       STR_INIT("gallery/photos/../public/new"),
@@ -222,7 +244,8 @@ static void test_check_output_dir_accepts_dir_outside_input_roots(void) {
   for (ptrdiff_t i = 0; i < (ptrdiff_t)(sizeof(output_dirs) / sizeof(output_dirs[0])); i++) {
     gallery_config.output_dir = output_dirs[i];
     struct Log log = test_log();
-    TEST_CHECK(manifest_builder_check_output_dir(&gallery_config, os, test_arena(), &log) == 0);
+    TEST_CHECK(manifest_builder_check_output_dir(&gallery_config, CONFIG_PATH, os, test_arena(),
+                                                 &log) == 0);
     TEST_CHECK(test_log_is_empty(&log));
     TEST_MSG("output_dir: '%.*s'", STR_FMT(output_dirs[i]));
   }
@@ -555,6 +578,39 @@ static void test_check_output_dir_rejects_dir_in_input_root(void) {
   check_rejects_output_dir_in_root(&gallery_config, "static_dir", os);
 }
 
+// An `output_dir` that holds an input root or the configuration file is rejected, because deleting
+// it to rebuild would delete the gallery's own files. The directories are compared by identity, so
+// a `..` spelling and a symlink to the holding directory are rejected the same way. Each root is
+// reported while it is held, and the configuration file once no root is.
+static void test_check_output_dir_rejects_dir_holding_input(void) {
+  struct GalleryConfig gallery_config;
+  struct Os* os = init_manifest_fixture(&gallery_config);
+  os_memory_write(os, "gallery/photos/x.jpg", "source");
+  os_memory_write(os, "gallery/static/a.css", "static");
+  os_memory_write(os, "elsewhere/photos/x.jpg", "source");
+  os_memory_write(os, "elsewhere/templates/album.html", "album");
+  os_memory_write(os, "elsewhere/static/a.css", "static");
+  os_memory_symlink(os, "gallery", "gallery-link");
+  static const struct Str holding_dirs[] = {
+      STR_INIT("."),
+      STR_INIT("gallery"),
+      STR_INIT("gallery/photos/.."),
+      STR_INIT("gallery-link"),
+  };
+  for (ptrdiff_t i = 0; i < (ptrdiff_t)(sizeof(holding_dirs) / sizeof(holding_dirs[0])); i++) {
+    gallery_config.output_dir = holding_dirs[i];
+    check_rejects_output_dir_holding(&gallery_config, "'input_dir'", os);
+  }
+
+  gallery_config.output_dir = S("gallery");
+  gallery_config.input_dir = S("elsewhere/photos");
+  check_rejects_output_dir_holding(&gallery_config, "'templates_dir'", os);
+  gallery_config.templates_dir = S("elsewhere/templates");
+  check_rejects_output_dir_holding(&gallery_config, "'static_dir'", os);
+  gallery_config.static_dir = S("elsewhere/static");
+  check_rejects_output_dir_holding(&gallery_config, "the config", os);
+}
+
 // An output that would land below `input_dir` is rejected even though no file sits at its path yet,
 // because the next build could discover it as media. The root is compared by identity, so an
 // alternate spelling of it, a symlink to it, a symlink inside `output_dir` that leads into it, and
@@ -751,6 +807,7 @@ TEST_LIST = {
     {"rejects config overwrite", test_rejects_config_overwrite},
     {"rejects template overwrite", test_rejects_template_overwrite},
     {"check output dir rejects dir in input root", test_check_output_dir_rejects_dir_in_input_root},
+    {"check output dir rejects dir holding input", test_check_output_dir_rejects_dir_holding_input},
     {"rejects output in input dir", test_rejects_output_in_input_dir},
     {"rejects output in templates dir", test_rejects_output_in_templates_dir},
     {"rejects output in static dir", test_rejects_output_in_static_dir},

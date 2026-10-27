@@ -377,30 +377,6 @@ static void test_rebuild_succeeds_and_repeats_its_outputs(void) {
   TEST_CHECK(os_memory_files(os, "public").count == public_count_built);
 }
 
-// An `input_dir` inside `output_dir` builds, because no output lands inside it: `output_dir = "."`
-// with `input_dir = "photos"` puts the gallery beside its sources. A rebuild succeeds and repeats
-// the same outputs, so neither walk reads the first build's derivatives back as media.
-static void test_builds_and_rebuilds_with_output_dir_holding_input_dir(void) {
-  struct Os* os = os_memory();
-  write_gallery_fixture(os, "output_dir = \".\"\n");
-  write_jpeg(os, "photos/album/one.jpg");
-
-  ptrdiff_t output_counts[2] = {0, 0};
-  for (int i = 0; i < 2; i++) {
-    struct Log log = test_log();
-    TEST_CHECK(execute_build(os, &log) == 0);
-    TEST_CHECK(test_log_is_empty(&log));
-    output_counts[i] = os_memory_files(os, ".").count;
-  }
-  // The config, the template, and the source, then the album page, the root page, both derivatives
-  // and the copied original.
-  TEST_CHECK(output_counts[0] == 8);
-  TEST_CHECK(output_counts[1] == output_counts[0]);
-  TEST_CHECK(os_memory_has_path(os, "index.html"));
-  TEST_CHECK(os_memory_has_path(os, "album/index.html"));
-  TEST_CHECK(os_memory_has_path(os, "_fram/originals/album/one-jpg.jpg"));
-}
-
 // An `output_dir` that a symlink inside `input_dir` reaches is left out of the media walk, so a
 // rebuild does not read the first build's outputs back as sources. The derivatives here are JPEG
 // files, which the walk would otherwise discover as media.
@@ -758,6 +734,24 @@ static void test_rejects_output_dir_inside_input_dir(void) {
   TEST_CHECK(!os_memory_has_path(os, "photos/generated"));
 }
 
+// An `output_dir` that holds `input_dir`, such as `output_dir = "."`, is refused before media is
+// discovered, so the gallery's own files never share a tree with its outputs, and the refused build
+// writes nothing beside them.
+static void test_rejects_output_dir_holding_input_dir(void) {
+  struct Os* os = os_memory();
+  write_gallery_fixture(os, "output_dir = \".\"\n");
+  write_jpeg(os, "photos/album/one.jpg");
+  const struct BuildOptions options = {.is_verbose = true};
+
+  TEST_CHECK(cmd_build_run(&options, os) == EXIT_CODE_FAILURE);
+  TEST_CHECK(os_memory_is_printed(os, 1, ""));
+  TEST_CHECK(os_memory_is_printed(os, 2,
+                                  "loading config\n"
+                                  "output directory would hold 'input_dir': '.'\n"));
+  // The config, the template, and the source.
+  TEST_CHECK(os_memory_files(os, ".").count == 3);
+}
+
 // Slugging is lossy, so two different source names can claim one output path. The manifest reports
 // the collision and names both sources instead of letting the second write win, once, at the first
 // output the two share, although they share both derivatives and the original. A non-ASCII byte
@@ -977,8 +971,6 @@ TEST_LIST = {
     {"builds an album with no media of its own", test_builds_an_album_with_no_media_of_its_own},
     {"renders configured sort orders", test_renders_configured_sort_orders},
     {"rebuild succeeds and repeats its outputs", test_rebuild_succeeds_and_repeats_its_outputs},
-    {"builds and rebuilds with output dir holding input dir",
-     test_builds_and_rebuilds_with_output_dir_holding_input_dir},
     {"rebuild skips output dir linked from input dir",
      test_rebuild_skips_output_dir_linked_from_input_dir},
     {"honors requested worker count", test_honors_requested_worker_count},
@@ -998,6 +990,7 @@ TEST_LIST = {
     {"reports unusable output dir", test_reports_unusable_output_dir},
     {"reports dangling output dir symlink", test_reports_dangling_output_dir_symlink},
     {"rejects output dir inside input dir", test_rejects_output_dir_inside_input_dir},
+    {"rejects output dir holding input dir", test_rejects_output_dir_holding_input_dir},
     {"rejects colliding source names", test_rejects_colliding_source_names},
     {"rejects static file colliding with album page",
      test_rejects_static_file_colliding_with_album_page},

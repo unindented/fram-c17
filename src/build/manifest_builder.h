@@ -15,7 +15,7 @@ struct PathList;
 
 /**
  * @brief Rejects an `output_dir` at or below `input_dir`, `templates_dir`, or `static_dir`, whether
- *        or not it exists yet.
+ *        or not it exists yet, and one that holds any of them or the configuration file.
  *
  * A build runs this before it walks an input tree or creates anything. An `output_dir` inside a
  * root puts every output inside it, where the next build would read them back as inputs, so this
@@ -26,17 +26,26 @@ struct PathList;
  * itself once it exists, so the answer does not depend on whether an earlier build created it. A
  * root that does not exist holds nothing to protect and is skipped.
  *
+ * An `output_dir` that holds a root or the configuration file, such as `output_dir = "."`, mixes
+ * the gallery's own files into the tree the build owns, where deleting `output_dir` to rebuild it
+ * deletes them too. Each root, and the directory the configuration file is in, is compared with
+ * `output_dir` the same way, along its own physical ancestors. An `output_dir` that does not exist
+ * yet holds nothing and passes. One `output_dir` can hold every root and the configuration file at
+ * once, which is one mistake, so only the first held input is reported.
+ *
  * @param gallery_config Configuration supplying `input_dir`, `output_dir`, `templates_dir`, and
  *                       `static_dir`. Must not be `NULL`.
+ * @param config_path    Path the configuration was loaded from.
  * @param os             Host the directories are on. Must not be `NULL`.
  * @param scratch        Arena for the ancestor paths the check builds.
  * @param log            Log that receives the error. Must not be `NULL`.
- * @return `0` when no input root holds `output_dir`, or `-1` when one does.
+ * @return `0` when `output_dir` and the inputs are apart, or `-1` when one holds the other.
  */
 int manifest_builder_check_output_dir(const struct GalleryConfig* gallery_config,
+                                      struct Str config_path,
                                       struct Os* os,
                                       struct Arena scratch,
-                                      struct Log* log) __attribute__((nonnull(1, 2, 4)));
+                                      struct Log* log) __attribute__((nonnull(1, 3, 5)));
 
 /**
  * @brief Records every intended output path in the build manifest, rejecting duplicates and any

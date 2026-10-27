@@ -23,10 +23,10 @@
  * intended output naming one of them can be rejected before anything is written.
  *
  * Path strings cannot reliably identify the same file. An output path is relative to `output_dir`,
- * but a source path is relative to `input_dir`. For example, `output_dir = "."` can produce
- * `./photos/x.jpg` for the source `photos/x.jpg`. That is one file with two spellings that are not
- * byte-equal. A `(device, inode)` comparison also detects cases that text cannot. These include
- * symlinks, hard links, and case-insensitive path aliases.
+ * but a source path is relative to `input_dir`. For example, a symlink `public/link` to `../photos`
+ * can produce `public/link/x.jpg` for the source `photos/x.jpg`. That is one file with two
+ * spellings that are not byte-equal. A `(device, inode)` comparison also detects cases that text
+ * cannot. These include symlinks, hard links, and case-insensitive path aliases.
  *
  * The input roots reject any output below `input_dir`, `templates_dir`, or `static_dir` first, so
  * this set is what still protects an input outside all three trees: the configuration file, and the
@@ -61,6 +61,9 @@ enum { INPUT_ROOT_COUNT = 3 };
 struct InputRoot {
   /** Config key naming the root in diagnostics. */
   struct Str config_key;
+
+  /** Configured path of the root directory. */
+  struct Str dir_path;
 
   /** Identity of the root directory. Set only when `is_present` is `true`. */
   struct OsIdentity identity;
@@ -113,9 +116,9 @@ struct InputRoots {
  * every file below `templates_dir`.
  *
  * This claims the configuration file for the same reason as the rest. It is a file this build
- * reads, and `output_dir = "."` with an aggregate template named after it is enough to aim an
- * output path at it. If unclaimed, that output would overwrite the gallery's configuration. The
- * build would still report success.
+ * reads, and a symlink inside `output_dir` to the directory it is in, with an aggregate template
+ * named after it, is enough to aim an output path at it. If unclaimed, that output would overwrite
+ * the gallery's configuration. The build would still report success.
  *
  * The whole template tree is claimed rather than the configured template names, because partials
  * are inputs too. `template.c` resolves them lazily during the render, from names that only appear
@@ -258,6 +261,24 @@ static struct Str find_nearest_existing_ancestor(struct Str dir_path,
 static struct InputRoot* find_input_root(struct InputRoots* roots,
                                          const struct OsIdentity* identity)
     __attribute__((nonnull(1, 2)));
+
+/**
+ * @brief Reports whether `output_dir` is `dir_path` or one of its physical ancestors.
+ *
+ * Walks up from `dir_path` by appending `..`, for the reasons `find_input_root_holding_output_dir`
+ * does, and stops at a match, at a path with no identity, or at the filesystem root.
+ *
+ * @param dir_path        Directory whose ancestors are searched. A path with no identity is held by
+ *                        nothing.
+ * @param output_identity Identity of `output_dir`. Must not be `NULL`.
+ * @param os              Host the directories are on. Must not be `NULL`.
+ * @param scratch         Arena for the ancestor paths.
+ * @return `true` when `output_dir` holds `dir_path`, otherwise `false`.
+ */
+static bool is_held_by_output_dir(struct Str dir_path,
+                                  const struct OsIdentity* output_identity,
+                                  struct Os* os,
+                                  struct Arena scratch) __attribute__((nonnull(2, 3)));
 
 /**
  * @brief Registers the outputs of every album, its page labeled by its source directory and each
@@ -518,6 +539,7 @@ static int identify(struct Str file_path, struct Os* os, struct OsIdentity* iden
     __attribute__((nonnull(2, 3)));
 
 int manifest_builder_check_output_dir(const struct GalleryConfig* gallery_config,
+                                      struct Str config_path,
                                       struct Os* os,
                                       struct Arena scratch,
                                       struct Log* log) {
@@ -529,6 +551,28 @@ int manifest_builder_check_output_dir(const struct GalleryConfig* gallery_config
     // value that broke the rule.
     return log_error(log, "output directory would write inside '%.*s': '%.*s'",
                      STR_FMT(root->config_key), STR_FMT(gallery_config->output_dir));
+  }
+
+  struct OsIdentity output_identity;
+  if (identify(gallery_config->output_dir, os, &output_identity) != 0) {
+    return 0;
+  }
+  for (ptrdiff_t i = 0; i < INPUT_ROOT_COUNT; i++) {
+    const struct InputRoot* held_root = &roots.items[i];
+    if (held_root->is_present &&
+        is_held_by_output_dir(held_root->dir_path, &output_identity, os, scratch)) {
+      return log_error(log, "output directory would hold '%.*s': '%.*s'",
+                       STR_FMT(held_root->config_key), STR_FMT(gallery_config->output_dir));
+    }
+  }
+  // `path_parent` is empty for a file in the working directory or directly below `/`.
+  struct Str config_dir = path_parent(config_path);
+  if (config_dir.len == 0) {
+    config_dir = str_startswith(config_path, S("/")) ? S("/") : S(".");
+  }
+  if (is_held_by_output_dir(config_dir, &output_identity, os, scratch)) {
+    return log_error(log, "output directory would hold the config: '%.*s'",
+                     STR_FMT(gallery_config->output_dir));
   }
   return 0;
 }
@@ -653,16 +697,15 @@ static void claim_input_roots(struct InputRoots* roots,
                               const struct GalleryConfig* gallery_config,
                               struct Os* os) {
   *roots = (struct InputRoots){
-      .items = {{.config_key = S("input_dir")},
-                {.config_key = S("templates_dir")},
-                {.config_key = S("static_dir")}},
+      .items = {{.config_key = S("input_dir"), .dir_path = gallery_config->input_dir},
+                {.config_key = S("templates_dir"), .dir_path = gallery_config->templates_dir},
+                {.config_key = S("static_dir"), .dir_path = gallery_config->static_dir}},
       .output_dir = gallery_config->output_dir,
       .os = os,
   };
-  const struct Str root_dirs[INPUT_ROOT_COUNT] = {
-      gallery_config->input_dir, gallery_config->templates_dir, gallery_config->static_dir};
   for (ptrdiff_t i = 0; i < INPUT_ROOT_COUNT; i++) {
-    roots->items[i].is_present = identify(root_dirs[i], os, &roots->items[i].identity) == 0;
+    struct InputRoot* root = &roots->items[i];
+    root->is_present = identify(root->dir_path, os, &root->identity) == 0;
   }
 }
 
@@ -724,6 +767,28 @@ static struct InputRoot* find_input_root(struct InputRoots* roots,
     }
   }
   return NULL;
+}
+
+static bool is_held_by_output_dir(struct Str dir_path,
+                                  const struct OsIdentity* output_identity,
+                                  struct Os* os,
+                                  struct Arena scratch) {
+  struct OsIdentity identity;
+  if (identify(dir_path, os, &identity) != 0) {
+    return false;
+  }
+  for (;;) {
+    if (os_identity_compare(&identity, output_identity) == 0) {
+      return true;
+    }
+    dir_path = path_join(dir_path, S(".."), &scratch);
+    struct OsIdentity parent_identity;
+    if (identify(dir_path, os, &parent_identity) != 0 ||
+        os_identity_compare(&parent_identity, &identity) == 0) {
+      return false;
+    }
+    identity = parent_identity;
+  }
 }
 
 static int register_album_list(struct Manifest* manifest,

@@ -514,8 +514,8 @@ static int load_build_inputs(struct BuildState* state, struct Log* log) {
       gallery_config->is_templates_dir_rejected || gallery_config->is_static_dir_rejected) {
     return -1;
   }
-  if (manifest_builder_check_output_dir(&state->gallery_config, state->os, state->scratch, log) !=
-      0) {
+  if (manifest_builder_check_output_dir(&state->gallery_config, GALLERY_CONFIG_PATH_DEFAULT,
+                                        state->os, state->scratch, log) != 0) {
     return -1;
   }
 
