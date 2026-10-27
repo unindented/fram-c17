@@ -18,6 +18,12 @@ file(COPY "${FRAM_GALLERY_DIR}/" DESTINATION "${FRAM_SCRATCH_DIR}")
 set(actual_dir "${FRAM_SCRATCH_DIR}/public")
 set(first_dir "${FRAM_SCRATCH_DIR}/first/public")
 
+# A stale page and a stale directory tree sit in the output before the first build, as an earlier
+# build of other sources would leave them. The build removes them, so the comparison below fails on
+# either as an output not expected.
+file(WRITE "${actual_dir}/stale.html" "stale")
+file(WRITE "${actual_dir}/stale-dir/nested/stale.txt" "stale")
+
 execute_process(
   COMMAND ${FRAM_EMULATOR} "${FRAM_EXECUTABLE}" build --workers 2
   WORKING_DIRECTORY "${FRAM_SCRATCH_DIR}"

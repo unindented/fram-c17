@@ -13,6 +13,7 @@
 #include "formats/image.h"
 #include "os_memory.h"
 #include "runtime/memory.h"
+#include "runtime/os.h"
 #include "runtime/pool.h"
 #include "shared/arena.h"
 #include "shared/buf.h"
@@ -377,6 +378,35 @@ static void test_rebuild_succeeds_and_repeats_its_outputs(void) {
   TEST_CHECK(os_memory_files(os, "public").count == public_count_built);
 }
 
+// A rebuild removes what the current inputs no longer produce: the outputs of a deleted source, an
+// old recipe directory, and a file added to `output_dir` by hand. Every current output stays, and a
+// third build finds nothing more to remove.
+static void test_rebuild_removes_stale_outputs(void) {
+  struct Os* os = os_memory();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/album/one.jpg");
+  write_jpeg(os, "photos/album/two.jpg");
+  TEST_CHECK(execute_build(os, &log) == 0);
+  TEST_CHECK(os_memory_has_path(os, "public/_fram/originals/album/two-jpg.jpg"));
+
+  TEST_CHECK(os_remove(os, S("photos/album/two.jpg"), S("failed to remove fixture"), &log) == 0);
+  os_memory_write(os, "public/notes.txt", "hand");
+  os_memory_write(os, "public/_fram/v1-old/album/one-jpg-s.jpg", "old");
+  TEST_CHECK(execute_build(os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  // The album page, the root page, both derivatives and the copied original of the one source left.
+  TEST_CHECK(os_memory_files(os, "public").count == 5);
+  TEST_CHECK(os_memory_has_path(os, "public/_fram/originals/album/one-jpg.jpg"));
+  TEST_CHECK(!os_memory_has_path(os, "public/_fram/originals/album/two-jpg.jpg"));
+  TEST_CHECK(!os_memory_has_path(os, "public/notes.txt"));
+  TEST_CHECK(!os_memory_has_path(os, "public/_fram/v1-old"));
+
+  TEST_CHECK(execute_build(os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(os_memory_files(os, "public").count == 5);
+}
+
 // An `output_dir` that a symlink inside `input_dir` reaches is left out of the media walk, so a
 // rebuild does not read the first build's outputs back as sources. The derivatives here are JPEG
 // files, which the walk would otherwise discover as media.
@@ -531,6 +561,8 @@ static void test_skips_empty_phases_in_verbose_output(void) {
                                   "writing album pages\n"
                                   "rendering aggregate templates\n"
                                   "copying static files\n"
+                                  "removing stale outputs\n"
+                                  "removed stale outputs: 0\n"
                                   "build complete\n"));
 }
 
@@ -813,6 +845,38 @@ static void test_reports_bad_template(void) {
                          "(while rendering the root album)\n"));
 }
 
+// A build that fails removes nothing, so a stale file from an earlier build is still there after a
+// render failure.
+static void test_failed_build_removes_no_stale_output(void) {
+  struct Os* os = os_memory();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/one.jpg");
+  os_memory_write(os, "public/notes.txt", "hand");
+  os_memory_write(os, "templates/album.html", "{{#media}}unclosed");
+
+  TEST_CHECK(execute_build(os, &log) == -1);
+  TEST_CHECK(log.errors == 1);
+  TEST_CHECK(os_memory_is_file(os, "public/notes.txt", "hand"));
+}
+
+// A stale entry that cannot be removed fails the build after every output is written, and the
+// failure names the entry.
+static void test_reports_stale_output_that_cannot_be_removed(void) {
+  struct Os* os = os_memory();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/one.jpg");
+  os_memory_write(os, "public/notes.txt", "hand");
+  os_memory_fail(os, OS_MEMORY_OP_REMOVE, "public/notes.txt", EACCES);
+
+  TEST_CHECK(execute_build(os, &log) == -1);
+  TEST_CHECK(test_log_is(&log, "failed to remove stale output: %s ('public/notes.txt')\n",
+                         strerror(EACCES)));
+  TEST_CHECK(os_memory_has_path(os, "public/index.html"));
+  TEST_CHECK(os_memory_has_path(os, "public/notes.txt"));
+}
+
 // Two albums that fail to render through one missing template fail for one cause. The report prints
 // the first album's line whole and counts the second, and both count as errors.
 static void test_reports_a_shared_render_failure_once(void) {
@@ -971,6 +1035,7 @@ TEST_LIST = {
     {"builds an album with no media of its own", test_builds_an_album_with_no_media_of_its_own},
     {"renders configured sort orders", test_renders_configured_sort_orders},
     {"rebuild succeeds and repeats its outputs", test_rebuild_succeeds_and_repeats_its_outputs},
+    {"rebuild removes stale outputs", test_rebuild_removes_stale_outputs},
     {"rebuild skips output dir linked from input dir",
      test_rebuild_skips_output_dir_linked_from_input_dir},
     {"honors requested worker count", test_honors_requested_worker_count},
@@ -995,6 +1060,9 @@ TEST_LIST = {
     {"rejects static file colliding with album page",
      test_rejects_static_file_colliding_with_album_page},
     {"reports bad template", test_reports_bad_template},
+    {"failed build removes no stale output", test_failed_build_removes_no_stale_output},
+    {"reports stale output that cannot be removed",
+     test_reports_stale_output_that_cannot_be_removed},
     {"reports a shared render failure once", test_reports_a_shared_render_failure_once},
     {"reports one line per failing media item", test_reports_one_line_per_failing_media_item},
     {"reports every independent error", test_reports_every_independent_error},

@@ -12,6 +12,7 @@
 #include "build/derivative_renderer.h"
 #include "build/job.h"
 #include "build/manifest_builder.h"
+#include "build/output_pruner.h"
 #include "build/page_renderer.h"
 #include "build/site_writer.h"
 #include "build/template.h"
@@ -388,6 +389,18 @@ static int write_generated_site(struct BuildState* state, struct Log* log)
     __attribute__((nonnull(1, 2)));
 
 /**
+ * @brief Removes every entry below `output_dir` that this build did not write.
+ *
+ * Run it only once every output is written, so a failed build removes nothing.
+ *
+ * @param state Build state holding the manifest and the configuration. Must not be `NULL`.
+ * @param log   Log that receives every failure. Must not be `NULL`.
+ * @return `0` when every stale entry was removed, or `-1` when one could not be listed or removed.
+ */
+static int prune_stale_outputs(struct BuildState* state, struct Log* log)
+    __attribute__((nonnull(1, 2)));
+
+/**
  * @brief Prints a formatted status line to `stderr` when the build is verbose.
  *
  * The line is formatted in a copy of the main thread's scratch arena and printed in one `os_print`
@@ -652,7 +665,7 @@ static int run_build_phases(struct BuildState* state, struct Log* log) {
   if (generate_derivatives(state, log) != 0 || render_album_pages(state, log) != 0) {
     goto cleanup;
   }
-  if (write_generated_site(state, log) != 0) {
+  if (write_generated_site(state, log) != 0 || prune_stale_outputs(state, log) != 0) {
     goto cleanup;
   }
 
@@ -749,6 +762,15 @@ static int write_generated_site(struct BuildState* state, struct Log* log) {
   build_verbose(state, "copying static files");
   return site_writer_copy_static_files(&state->gallery_config, &state->static_paths, state->os,
                                        state->scratch, log);
+}
+
+static int prune_stale_outputs(struct BuildState* state, struct Log* log) {
+  build_verbose(state, "removing stale outputs");
+  ptrdiff_t removed_count = 0;
+  const int rc = output_pruner_prune(&state->manifest, &state->gallery_config, state->os,
+                                     state->scratch, &removed_count, log);
+  build_verbose(state, "removed stale outputs: %td", removed_count);
+  return rc;
 }
 
 // A status line runs on the main thread between phases, so it does not need the lock that

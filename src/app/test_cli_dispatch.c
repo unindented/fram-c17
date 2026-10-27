@@ -210,6 +210,8 @@ static void test_build_command_receives_parsed_options(void) {
                     "writing album pages\n"
                     "rendering aggregate templates\n"
                     "copying static files\n"
+                    "removing stale outputs\n"
+                    "removed stale outputs: 0\n"
                     "build complete\n") == 0);
   TEST_CHECK(access("public/index.html", F_OK) == 0);
   TEST_CHECK(access("public/_fram/originals/a-jpg.jpg", F_OK) == 0);
