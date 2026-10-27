@@ -47,16 +47,16 @@ jobs:
 
       - name: Install cwrap
         env:
-          CWRAP_VERSION: 0.3.0
+          CWRAP_VERSION: 0.3.1
         run: |
           case "$RUNNER_OS-$RUNNER_ARCH" in
             Linux-X64)
               target=x86_64-linux-musl
-              sha256=d75b646758e554718fa870098c15db78cd3eca101ba3d9c0fbb5dd47d2e1d4f4
+              sha256=abb3b27c528cd04d1712e54da502b153b348454a650109a5acec88f2c680fd47
               ;;
             macOS-ARM64)
               target=aarch64-macos
-              sha256=cc684f4aa5fec66705efc6919b8e5379da424dfd5203887610434a8727d3bd03
+              sha256=960069c7935653ad9531094f6202e779046d05420812585f3bb56aa675946981
               ;;
             *)
               echo "no cwrap release for $RUNNER_OS-$RUNNER_ARCH" >&2
