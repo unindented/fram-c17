@@ -781,6 +781,14 @@ int os_remove(struct Os* os, struct Str file_path, struct Str operation, struct 
 
 int os_remove_dir(struct Os* os, struct Str dir_path, struct Str operation, struct Log* log) {
   const struct OsMemoryReport report = {operation, log};
+  // A last component followed by `/` is looked up through a symlink, so the trailing `/` characters
+  // go, as the POSIX host drops them, and a symlink fails as `ENOTDIR` with or without them. A path
+  // the system could not take keeps them, so the lookup fails it as `ENAMETOOLONG`, as POSIX does.
+  struct Str lookup_path = dir_path;
+  while (dir_path.len < PATH_MAX && lookup_path.len > 1 &&
+         lookup_path.data[lookup_path.len - 1] == '/') {
+    lookup_path = str_head(lookup_path, lookup_path.len - 1);
+  }
   host_lock(os);
   struct Arena scratch = os->scratch;
   struct OsMemoryLookup lookup = {0};
@@ -788,7 +796,7 @@ int os_remove_dir(struct Os* os, struct Str dir_path, struct Str operation, stru
   const int fault = fault_find(os, OS_MEMORY_OP_REMOVE, dir_path);
   if (fault != 0) {
     rc = report_errno(&report, dir_path, fault);
-  } else if (tree_lookup(os, dir_path, false, &scratch, &lookup) != 0) {
+  } else if (tree_lookup(os, lookup_path, false, &scratch, &lookup) != 0) {
     rc = errno == ENOENT ? 0 : report_errno(&report, dir_path, errno);
   } else if (os->nodes[lookup.node].kind != OS_MEMORY_NODE_DIR) {
     rc = report_errno(&report, dir_path, ENOTDIR);

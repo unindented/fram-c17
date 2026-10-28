@@ -941,9 +941,10 @@ static void test_remove_rejects_directory_and_path_with_nul(void) {
   contract_end(&c);
 }
 
-// `os_remove_dir` removes an empty directory, and counts a path that names nothing as removed. It
-// refuses a directory that holds an entry, a file, and a symlink to a directory, which it leaves in
-// place.
+// `os_remove_dir` removes an empty directory, followed by `/` or not, and counts a path that names
+// nothing as removed. It refuses a directory that holds an entry, a file, a symlink to a directory,
+// even an empty one followed by `/`, and a directory followed by `/` characters up to `PATH_MAX`
+// bytes, which it leaves in place.
 static void test_remove_dir_removes_only_empty_directories(void) {
   char root[] = "/tmp/fram-os-remove-dir.XXXXXX";
   struct Contract c;
@@ -976,6 +977,28 @@ static void test_remove_dir_removes_only_empty_directories(void) {
   TEST_CHECK(test_log_is(&log, "op: %s ('%.*s')\n", strerror(ENOTDIR), STR_FMT(link_path)));
   TEST_CHECK(os_stat(c.os, file_path, &st) == 0);
   TEST_CHECK(os_stat(c.os, link_path, &st) == 0 && st.is_dir);
+
+  const struct Str kept_dir = contract_path(&c, "kept/");
+  log = test_log();
+  TEST_CHECK(os_mkdirs(c.os, kept_dir, S("op"), &log) == 0);
+  contract_symlink(&c, "kept", "kept-link");
+  const struct Str link_slash_path = contract_path(&c, "kept-link/");
+  TEST_CHECK(os_remove_dir(c.os, link_slash_path, S("op"), &log) == -1);
+  TEST_CHECK(test_log_is(&log, "op: %s ('%.*s')\n", strerror(ENOTDIR), STR_FMT(link_slash_path)));
+  TEST_CHECK(os_stat(c.os, kept_dir, &st) == 0 && st.is_dir);
+
+  static char slashes[PATH_MAX];
+  memset(slashes, '/', sizeof(slashes));
+  const struct Str long_path =
+      str_concat(kept_dir, (struct Str){slashes, PATH_MAX - kept_dir.len}, &c.arena);
+  log = test_log();
+  TEST_CHECK(os_remove_dir(c.os, long_path, S("op"), &log) == -1);
+  TEST_CHECK(test_log_is(&log, "op: %s ('%.*s')\n", strerror(ENAMETOOLONG), STR_FMT(long_path)));
+  TEST_CHECK(os_stat(c.os, kept_dir, &st) == 0 && st.is_dir);
+  log = test_log();
+  TEST_CHECK(os_remove_dir(c.os, kept_dir, S("op"), &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(os_stat(c.os, kept_dir, &st) == -1);
   contract_end(&c);
 }
 

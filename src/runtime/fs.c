@@ -424,6 +424,11 @@ int os_remove_dir(struct Os* os, struct Str dir_path, struct Str operation, stru
   if (copy_cstr(dir_path, path) != 0) {
     return report_errno(&report, dir_path, errno);
   }
+  // Some systems' `rmdir` removes the directory a symlink names when the path ends in `/`, so the
+  // trailing `/` characters go, and a symlink fails as `ENOTDIR` with or without them.
+  for (ptrdiff_t len = dir_path.len; len > 1 && path[len - 1] == '/'; len--) {
+    path[len - 1] = '\0';
+  }
   if (rmdir(path) != 0 && errno != ENOENT) {
     return report_errno(&report, dir_path, errno);
   }

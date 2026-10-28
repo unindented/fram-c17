@@ -283,7 +283,8 @@ int os_remove(struct Os* os, struct Str file_path, struct Str operation, struct 
  * A path that names nothing counts as removed, as it does for `os_remove`.
  *
  * @param os        Host to remove from. Must not be `NULL`.
- * @param dir_path  Path of the directory to remove. A symlink to a directory is not one.
+ * @param dir_path  Path of the directory to remove. A symlink to a directory is not one, even
+ *                  followed by `/`.
  * @param operation Operation leading the failure message, which names `dir_path`.
  * @param log       Log that receives the failure. Must not be `NULL`.
  * @return `0` on success or when `dir_path` names nothing, or `-1` when it names something other
