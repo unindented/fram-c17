@@ -278,6 +278,19 @@ static int write_all(int fd, struct Str data);
 static int copy_cstr(struct Str path, char cstr_out[static PATH_MAX]);
 
 /**
+ * @brief Reports whether a path ends in `/` but names something other than a directory.
+ *
+ * A path that ends in `/` must name a directory, and POSIX has `open` and `stat` fail with
+ * `ENOTDIR` when it does not. Some systems resolve `link/`, where `link` is a symlink to a file, as
+ * the file, so the host checks what the call found.
+ *
+ * @param path Path the caller gave.
+ * @param mode `st_mode` of what it found.
+ * @return `true` when `path` ends in `/` and `mode` is not a directory's, or `false` otherwise.
+ */
+static bool is_slash_on_non_dir(struct Str path, mode_t mode);
+
+/**
  * @brief Reports `error_number` as the cause of the caller's operation failing on `path`.
  *
  * This is for a failure on the path the caller's operation targeted, as in
@@ -464,6 +477,10 @@ int os_stat(struct Os* os, struct Str file_path, struct OsStat* stat_out) {
   char path[PATH_MAX];
   struct stat st;
   if (copy_cstr(file_path, path) != 0 || stat(path, &st) != 0) {
+    return -1;
+  }
+  if (is_slash_on_non_dir(file_path, st.st_mode)) {
+    errno = ENOTDIR;
     return -1;
   }
   stat_out->identity = (struct OsIdentity){(uint64_t)st.st_dev, (uint64_t)st.st_ino};
@@ -741,6 +758,8 @@ static int open_regular(struct Str file_path,
   int rc = 0;
   if (fstat(fd, st_out) != 0) {
     rc = report_errno(report, file_path, errno);
+  } else if (is_slash_on_non_dir(file_path, st_out->st_mode)) {
+    rc = report_errno(report, file_path, ENOTDIR);
   } else if (!S_ISREG(st_out->st_mode)) {
     rc = log_error(report->log, "%.*s: not a regular file ('%.*s')", STR_FMT(report->operation),
                    STR_FMT(file_path));
@@ -792,6 +811,10 @@ static int copy_cstr(struct Str path, char cstr_out[static PATH_MAX]) {
   }
   cstr_out[path.len] = '\0';
   return 0;
+}
+
+static bool is_slash_on_non_dir(struct Str path, mode_t mode) {
+  return str_endswith(path, S("/")) && !S_ISDIR(mode);
 }
 
 static int report_errno(const struct FsReport* report, struct Str path, int error_number) {

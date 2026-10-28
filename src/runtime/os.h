@@ -39,7 +39,9 @@ struct Log;
 // Every path is a `struct Str`. A path the POSIX system could not take whole fails rather than
 // naming some other file: one of `PATH_MAX` bytes or more fails as `ENAMETOOLONG`, as the system
 // would fail it, and one holding a `NUL` byte fails as `EINVAL`, because the system would read only
-// the bytes before it.
+// the bytes before it. A path that ends in `/` must name a directory, so a read, a listing or a
+// `stat` of one that names anything else fails as `ENOTDIR`, even on a system that would resolve
+// `link/` to the file `link` points to.
 //
 // Every operation below that can fail and takes a `log` also takes the caller's `operation`, such
 // as `failed to read config`, and records one error in `log` that leads with it and then gives the
