@@ -256,7 +256,7 @@ static void check_generate_applies_orientation(ptrdiff_t source_len) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 4, 16, 16, 95);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   struct Image decoded = {0};
   init_item(&item, MEDIA_KIND_IMAGE, "oriented.jpg", &arena);
@@ -297,7 +297,7 @@ static void test_generate_image_and_skip_fresh_outputs(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 90);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   ptrdiff_t width = 0;
   ptrdiff_t height = 0;
@@ -344,7 +344,7 @@ static void test_generate_decodes_large_source_scaled(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 95);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   init_item(&item, MEDIA_KIND_IMAGE, "large.jpg", &arena);
   enum { WIDTH = 128, HEIGHT = 64 };
@@ -423,7 +423,7 @@ static void test_generate_refreshes_outputs_independently(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
   if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
@@ -456,7 +456,7 @@ static void test_generate_avoids_decode_when_derivatives_fresh(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
   if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
@@ -486,7 +486,7 @@ static void test_dry_run_marks_fresh_outputs_kept(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
   if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
@@ -514,7 +514,7 @@ static void test_dry_run_marks_stale_outputs_written_without_making_them(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
   os_memory_write(os, "photos/source.jpg", "not a JPEG");
@@ -551,7 +551,7 @@ static void test_verbose_prints_one_progress_line_per_job(void) {
   struct Str jpeg = {0};
   struct MediaItem items[ITEM_COUNT];
   struct MediaItem* media[ITEM_COUNT];
-  struct VideoFrame frames[ITEM_COUNT] = {{0}};
+  struct VideoFrame frames[ITEM_COUNT] = {0};
   static const char* const names[ITEM_COUNT] = {"a.jpg", "b.jpg", "c.jpg"};
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
@@ -598,7 +598,7 @@ static void test_writes_derivatives_sharing_parents_concurrently(void) {
   struct Str jpeg = {0};
   struct MediaItem items[ITEM_COUNT];
   struct MediaItem* media[ITEM_COUNT];
-  struct VideoFrame frames[ITEM_COUNT] = {{0}};
+  struct VideoFrame frames[ITEM_COUNT] = {0};
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct Log log = test_log();
@@ -640,7 +640,7 @@ static void test_accepts_empty_media_set(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[1] = {NULL};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
 
   TEST_CHECK(generate(&config, media, 0, frames, 1, false, os_memory(), &log) == 0);
@@ -657,7 +657,7 @@ static void test_derivative_write_follows_symlink(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
   if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
@@ -689,7 +689,7 @@ static void test_failed_derivative_write_is_regenerated(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
   if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
@@ -740,7 +740,7 @@ static void test_reports_read_failure_with_long_source_path(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   init_item(&item, MEDIA_KIND_IMAGE, name, &arena);
   const char* source = str_cstr(item.source_path, &arena);
@@ -769,7 +769,7 @@ static void test_reports_unreadable_source(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
   if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
@@ -796,7 +796,7 @@ static void test_reports_directory_source_once(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
   os_memory_mkdir(os, "photos/source.jpg");
@@ -818,7 +818,7 @@ static void test_rejects_oversize_source(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct Log log = test_log();
   init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
   os_memory_write(os, "photos/source.jpg", "");
@@ -850,7 +850,7 @@ static void test_appends_one_error_line_per_failing_source(void) {
   struct GalleryConfig config;
   test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
   struct MediaItem* media[] = {&items[0], &items[1]};
-  struct VideoFrame frames[2] = {{0}};
+  struct VideoFrame frames[2] = {0};
   struct Log log = test_log();
   for (ptrdiff_t i = 0; i < 2; i++) {
     init_item(&items[i], MEDIA_KIND_IMAGE, names[i], &arena);

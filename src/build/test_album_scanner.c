@@ -608,7 +608,7 @@ static void test_probe_media_orients_image_dimensions(void) {
                            .derivatives = derivatives,
                            .derivative_count = 3};
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct OsStat stats[1] = {0};
   struct JobArenas* worker_arenas = NULL;
   struct Log log = test_log();
@@ -654,7 +654,7 @@ static void test_probe_media_sizes_cropped_derivative_exactly(void) {
                            .derivatives = &derivative,
                            .derivative_count = 1};
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct OsStat stats[1] = {0};
   struct JobArenas* worker_arenas = NULL;
   struct Log log = test_log();
@@ -681,7 +681,7 @@ static void test_probe_media_collects_failure(void) {
   test_album_scanner_init_config(&config);
   struct MediaItem item = {.source_path = path, .kind = MEDIA_KIND_IMAGE};
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct OsStat stats[1] = {0};
   struct Log log = test_log();
   struct JobArenas* worker_arenas = test_job_arenas(1, &arena);
@@ -783,7 +783,7 @@ static void test_probe_media_rejects_oversize_source(void) {
   test_album_scanner_init_config(&config);
   struct MediaItem item = {.source_path = S("photos/huge.jpg"), .kind = MEDIA_KIND_IMAGE};
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct OsStat stats[1] = {0};
   struct Log log = test_log();
   os_memory_write(os, "photos/huge.jpg", "");
