@@ -35,9 +35,9 @@ jobs:
         run: |
           wget https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
-          sudo ./llvm.sh 22 all
+          sudo ./llvm.sh 23 all
           sudo apt-get install -y cppcheck ffmpeg nasm ninja-build
-          echo "CC=clang-22" >> "$GITHUB_ENV"
+          echo "CC=clang-23" >> "$GITHUB_ENV"
 
       - name: Install quality tools (macOS)
         if: runner.os == 'macOS'

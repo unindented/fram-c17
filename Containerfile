@@ -1,6 +1,6 @@
 FROM docker.io/library/ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944
 
-ARG LLVM_VERSION=22
+ARG LLVM_VERSION=23
 ARG GCC_VERSION=14
 
 RUN apt-get update \
@@ -46,7 +46,7 @@ RUN case "$(uname -m)" in \
       "cwrap-${CWRAP_VERSION}-${target}/bin/cwrap" \
     && rm "/tmp/${archive}"
 
-ENV CC=clang-22
+ENV CC=clang-23
 
 COPY . /src
 WORKDIR /src

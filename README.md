@@ -320,7 +320,7 @@ podman run --rm fram-linux-ci ci-multi
 podman run --rm -e CC=gcc-14 fram-linux-ci ci-multi
 ```
 
-The image supports x86-64 and AArch64 hosts and pins LLVM 22 and GCC 14. Zig remains a release-only dependency and is not included in the CI image.
+The image supports x86-64 and AArch64 hosts and pins LLVM 23 and GCC 14. Zig remains a release-only dependency and is not included in the CI image.
 
 See [BUILD.md](BUILD.md) for the target graph and the reasons behind these configurations.
 

@@ -126,9 +126,9 @@ set(fram_owned_sources
 )
 set(fram_configured_c_source "${PROJECT_SOURCE_DIR}/src/core/fram_version.c.in")
 
-find_program(FRAM_CLANG_FORMAT NAMES clang-format-22 clang-format)
+find_program(FRAM_CLANG_FORMAT NAMES clang-format-23 clang-format)
 find_program(FRAM_CWRAP NAMES cwrap)
-find_program(FRAM_CLANG_TIDY NAMES clang-tidy-22 clang-tidy)
+find_program(FRAM_CLANG_TIDY NAMES clang-tidy-23 clang-tidy)
 find_program(FRAM_CPPCHECK NAMES cppcheck)
 
 set(fram_clang_tidy_command "${FRAM_CLANG_TIDY}")
