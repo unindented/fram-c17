@@ -61,6 +61,7 @@ static enum ExitCode cli_dispatch_command(const struct CliOptions* options, stru
       const struct BuildOptions build_options = {
           .worker_count = options->worker_count,
           .is_verbose = options->is_verbose,
+          .is_dry_run = options->is_dry_run,
       };
       return cmd_build_run(&build_options, os);
     }

@@ -93,6 +93,40 @@ static void write_gallery_fixture(struct Os* os, const char* config_extra) {
   os_memory_write(os, "fram.toml", buf_cstr(&config));
 }
 
+/** Files `every_output_kind_fixture` builds to, in byte order. */
+static const char* const EVERY_OUTPUT_KIND_FILES[] = {
+    "public/_fram/originals/album/one-jpg.jpg",
+    "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.webp",
+    "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.webp",
+    "public/album/index.html",
+    "public/fram.css",
+    "public/index.html",
+    "public/sitemap.xml",
+};
+
+/** Number of paths in `EVERY_OUTPUT_KIND_FILES`. */
+enum {
+  EVERY_OUTPUT_KIND_FILE_COUNT = sizeof(EVERY_OUTPUT_KIND_FILES) /
+  sizeof(EVERY_OUTPUT_KIND_FILES[0])
+};
+
+/**
+ * @brief Returns a host holding a gallery with one output of every kind: album pages, derivatives,
+ *        an original, an aggregate and a static file, beside a file in `input_dir` that is not
+ *        media, which build to `EVERY_OUTPUT_KIND_FILES`.
+ *
+ * @return The host.
+ */
+static struct Os* every_output_kind_fixture(void) {
+  struct Os* os = os_memory();
+  write_gallery_fixture(os, "aggregate_templates = [\"sitemap.xml\"]\n");
+  os_memory_write(os, "templates/sitemap.xml", "sitemap\n");
+  write_jpeg(os, "photos/album/one.jpg");
+  os_memory_write(os, "photos/album/notes.txt", "not media\n");
+  os_memory_write(os, "static/fram.css", "body{}\n");
+  return os;
+}
+
 /**
  * @brief Executes a build with the given options in test arenas and collects its errors.
  *
@@ -127,6 +161,18 @@ static int execute_build_with_options(const struct BuildOptions* options,
  */
 static int execute_build(struct Os* os, struct Log* log) {
   const struct BuildOptions options = {0};
+  return execute_build_with_options(&options, os, log);
+}
+
+/**
+ * @brief Executes a dry run with otherwise default options and collects its errors.
+ *
+ * @param os  Host the dry run runs against. Must not be `NULL`.
+ * @param log Log that receives every build error. Must not be `NULL`.
+ * @return `0` on success, or `-1` on build failure.
+ */
+static int execute_dry_run(struct Os* os, struct Log* log) {
+  const struct BuildOptions options = {.is_dry_run = true};
   return execute_build_with_options(&options, os, log);
 }
 
@@ -182,6 +228,37 @@ static bool has_printed_line(struct Os* os, int fd, const char* line) {
 }
 
 /**
+ * @brief Reports whether the `write` lines a dry run printed name exactly the files below `public`
+ *        on another host, printing the listing when they do not.
+ *
+ * Every line must be a `write` line, and the manifest makes the listed paths distinct, so a count
+ * that matches and a path for each line that exists there make the two sets equal.
+ *
+ * @param dry_run_os Host the dry run printed its listing on. Must not be `NULL`.
+ * @param real_os    Host a real build of the same gallery wrote. Must not be `NULL`.
+ * @return `true` when the sets are equal.
+ */
+static bool is_write_set_of(struct Os* dry_run_os, struct Os* real_os) {
+  const struct Str printed = os_memory_printed(dry_run_os, 1);
+  const struct PathList files = os_memory_files(real_os, "public");
+  struct Arena arena = test_arena();
+  ptrdiff_t line_count = 0;
+  bool is_equal = true;
+  for (struct StrCut cut = str_cut(printed, '\n'); cut.is_found; cut = str_cut(cut.tail, '\n')) {
+    const struct StrCut fields = str_cut(cut.head, '\t');
+    is_equal = is_equal && str_eq(fields.head, S("write")) &&
+               os_memory_has_path(real_os, str_cstr(fields.tail, &arena));
+    line_count++;
+  }
+  is_equal = is_equal && line_count == files.count;
+  TEST_CHECK_(is_equal, "the dry run lists exactly the files a real build writes");
+  if (!is_equal) {
+    TEST_MSG("printed: '%.*s'", STR_FMT(printed));
+  }
+  return is_equal;
+}
+
+/**
  * @brief Runs a one-worker build in `TINY_ARENA_SIZE` bytes of arenas. Run through `test_is_oom`,
  *        which calls it in a child process.
  *
@@ -216,27 +293,13 @@ static void test_honors_configured_album_template(void) {
 // A build writes exactly the manifest's intended outputs: album pages, derivatives, originals,
 // aggregate outputs and static files, and nothing for a file in `input_dir` that is not media.
 static void test_writes_exactly_manifest_outputs(void) {
-  struct Os* os = os_memory();
-  static const char* const expected[] = {
-      "public/_fram/originals/album/one-jpg.jpg",
-      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.webp",
-      "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.webp",
-      "public/album/index.html",
-      "public/fram.css",
-      "public/index.html",
-      "public/sitemap.xml",
-  };
+  struct Os* os = every_output_kind_fixture();
   struct Log log = test_log();
-  write_gallery_fixture(os, "aggregate_templates = [\"sitemap.xml\"]\n");
-  os_memory_write(os, "templates/sitemap.xml", "sitemap\n");
-  write_jpeg(os, "photos/album/one.jpg");
-  os_memory_write(os, "photos/album/notes.txt", "not media\n");
-  os_memory_write(os, "static/fram.css", "body{}\n");
 
   TEST_CHECK(execute_build(os, &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
   // Exactly the expected set, so neither an extra output nor the non-media file passes.
-  TEST_CHECK(is_file_list(os, "public", expected, sizeof(expected) / sizeof(expected[0])));
+  TEST_CHECK(is_file_list(os, "public", EVERY_OUTPUT_KIND_FILES, EVERY_OUTPUT_KIND_FILE_COUNT));
 }
 
 // A trailing slash on `input_dir` does not leak the directory name into the output tree. The prefix
@@ -424,6 +487,104 @@ static void test_rebuild_skips_output_dir_linked_from_input_dir(void) {
   // linked output tree.
   TEST_CHECK(os_memory_files(os, "public").count == 5);
   TEST_CHECK(!os_memory_has_path(os, "public/published"));
+}
+
+// A dry run of a gallery with every kind of output succeeds and creates nothing, not even
+// `output_dir`, which shows `prepare_output_dir` was withheld. Its `write` lines name exactly the
+// files a real build of the same gallery writes, so no site left a path pending.
+static void test_dry_run_lists_every_output_and_writes_nothing(void) {
+  struct Os* real_os = every_output_kind_fixture();
+  struct Os* dry_run_os = every_output_kind_fixture();
+  struct Log log = test_log();
+
+  TEST_CHECK(execute_build(real_os, &log) == 0);
+  TEST_CHECK(execute_dry_run(dry_run_os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(!os_memory_has_path(dry_run_os, "public"));
+  TEST_CHECK(is_write_set_of(dry_run_os, real_os));
+}
+
+// After a build, a dry run lists every derivative and the original as `keep`, because they are
+// fresh, and every page as `write`, in manifest order.
+static void test_dry_run_keeps_fresh_media(void) {
+  struct Os* os = os_memory();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/album/one.jpg");
+  TEST_CHECK(execute_build(os, &log) == 0);
+
+  TEST_CHECK(execute_dry_run(os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(os_memory_is_printed(
+      os, 1,
+      "write\tpublic/index.html\n"
+      "write\tpublic/album/index.html\n"
+      "keep\tpublic/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.webp\n"
+      "keep\tpublic/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.webp\n"
+      "keep\tpublic/_fram/originals/album/one-jpg.jpg\n"));
+}
+
+// After a build, a changed `[derivatives.*]` table makes a dry run list the new derivatives as
+// `write` and the old recipe directory as `remove`, sorted, with everything in it. The old
+// directory is still there afterward.
+static void test_dry_run_lists_stale_recipe_and_keeps_it(void) {
+  struct Os* os = os_memory();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/album/one.jpg");
+  TEST_CHECK(execute_build(os, &log) == 0);
+  os_memory_write(os, "fram.toml",
+                  "title = \"Test Gallery\"\n"
+                  "author = \"Tests\"\n"
+                  "input_dir = \"photos\"\n"
+                  "[derivatives.s]\nwidth = 4\nheight = 4\nquality = 70\ncrop = true\n"
+                  "[derivatives.m]\nwidth = 16\nheight = 16\nquality = 75\n");
+
+  TEST_CHECK(execute_dry_run(os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(os_memory_is_printed(
+      os, 1,
+      "write\tpublic/index.html\n"
+      "write\tpublic/album/index.html\n"
+      "write\tpublic/_fram/v2-s-4x4c-q70-m-16x16-q75-f1000/album/one-jpg-s.webp\n"
+      "write\tpublic/_fram/v2-s-4x4c-q70-m-16x16-q75-f1000/album/one-jpg-m.webp\n"
+      "keep\tpublic/_fram/originals/album/one-jpg.jpg\n"
+      "remove\tpublic/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000\n"
+      "remove\tpublic/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album\n"
+      "remove\tpublic/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.webp\n"
+      "remove\tpublic/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.webp\n"));
+  TEST_CHECK(
+      os_memory_has_path(os, "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.webp"));
+  TEST_CHECK(!os_memory_has_path(os, "public/_fram/v2-s-4x4c-q70-m-16x16-q75-f1000"));
+}
+
+// A dry run over an existing tree, with a new photo to write and a stale file to remove, where
+// every write and every removal below `output_dir` would fail, still succeeds, so it attempts
+// neither.
+static void test_dry_run_attempts_no_change(void) {
+  struct Os* os = every_output_kind_fixture();
+  struct Log log = test_log();
+  TEST_CHECK(execute_build(os, &log) == 0);
+  os_memory_write(os, "public/notes.txt", "hand");
+  write_jpeg(os, "photos/album/two.jpg");
+  os_memory_fail(os, OS_MEMORY_OP_WRITE, "public", EACCES);
+  os_memory_fail(os, OS_MEMORY_OP_REMOVE, "public", EACCES);
+
+  TEST_CHECK(execute_dry_run(os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(os_memory_is_file(os, "public/notes.txt", "hand"));
+}
+
+// A dry run leaves nothing behind that a later build sees: a real build after it writes the same
+// files as a real build alone.
+static void test_dry_run_leaves_no_state(void) {
+  struct Os* os = every_output_kind_fixture();
+  struct Log log = test_log();
+  TEST_CHECK(execute_dry_run(os, &log) == 0);
+  TEST_CHECK(execute_build(os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(is_file_list(os, "public", EVERY_OUTPUT_KIND_FILES, EVERY_OUTPUT_KIND_FILE_COUNT));
+  TEST_CHECK(os_memory_is_file(os, "public/sitemap.xml", "sitemap\n"));
 }
 
 // A caller-supplied `worker_count` reaches every pool instead of being replaced by the detected
@@ -845,6 +1006,40 @@ static void test_reports_bad_template(void) {
                          "(while rendering the root album)\n"));
 }
 
+// A dry run renders every page, so an album template that does not compile fails it with the
+// diagnostic a real build gives, and no listing is printed.
+static void test_dry_run_reports_bad_template(void) {
+  struct Os* os = os_memory();
+  struct Log log = test_log();
+  write_gallery_fixture(os, "album_template = \"broken.html\"\n");
+  os_memory_write(os, "templates/broken.html", "{{#media}}unclosed");
+  write_jpeg(os, "photos/one.jpg");
+
+  TEST_CHECK(execute_dry_run(os, &log) == -1);
+  TEST_CHECK(test_log_is(&log,
+                         "section-opening tag has no closer at line 1, column 1 (in 'broken.html') "
+                         "(while rendering the root album)\n"));
+  TEST_CHECK(os_memory_is_printed(os, 1, ""));
+}
+
+// A dry run of two sources on one output path fails with the duplicate-path diagnostic a real build
+// gives, and no listing is printed.
+static void test_dry_run_rejects_colliding_source_names(void) {
+  struct Os* os = os_memory();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/album/caf\xC3\xA9.jpg");
+  write_jpeg(os, "photos/album/cafc3a9.jpg");
+
+  TEST_CHECK(execute_dry_run(os, &log) == -1);
+  TEST_CHECK(
+      test_log_is(&log,
+                  "duplicate output path for 'photos/album/cafc3a9.jpg' and "
+                  "'photos/album/caf\xC3\xA9.jpg': "
+                  "'public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/cafc3a9-jpg-s.webp'\n"));
+  TEST_CHECK(os_memory_is_printed(os, 1, ""));
+}
+
 // A build that fails removes nothing, so a stale file from an earlier build is still there after a
 // render failure.
 static void test_failed_build_removes_no_stale_output(void) {
@@ -1038,6 +1233,12 @@ TEST_LIST = {
     {"rebuild removes stale outputs", test_rebuild_removes_stale_outputs},
     {"rebuild skips output dir linked from input dir",
      test_rebuild_skips_output_dir_linked_from_input_dir},
+    {"dry run lists every output and writes nothing",
+     test_dry_run_lists_every_output_and_writes_nothing},
+    {"dry run keeps fresh media", test_dry_run_keeps_fresh_media},
+    {"dry run lists stale recipe and keeps it", test_dry_run_lists_stale_recipe_and_keeps_it},
+    {"dry run attempts no change", test_dry_run_attempts_no_change},
+    {"dry run leaves no state", test_dry_run_leaves_no_state},
     {"honors requested worker count", test_honors_requested_worker_count},
     {"caps the worker count at four per CPU", test_caps_the_worker_count_at_four_per_cpu},
     {"cuts workers before arenas under limit", test_cuts_workers_before_arenas_under_limit},
@@ -1060,6 +1261,8 @@ TEST_LIST = {
     {"rejects static file colliding with album page",
      test_rejects_static_file_colliding_with_album_page},
     {"reports bad template", test_reports_bad_template},
+    {"dry run reports bad template", test_dry_run_reports_bad_template},
+    {"dry run rejects colliding source names", test_dry_run_rejects_colliding_source_names},
     {"failed build removes no stale output", test_failed_build_removes_no_stale_output},
     {"reports stale output that cannot be removed",
      test_reports_stale_output_that_cannot_be_removed},

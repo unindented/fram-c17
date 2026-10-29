@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "build/output_pruner.h"
+#include "build/output_writer.h"
 #include "core/path.h"
 #include "domain/gallery_config.h"
 #include "domain/manifest.h"
@@ -82,9 +83,10 @@ static void test_keeps_output_named_in_another_case(void) {
   struct Manifest manifest = {0};
   TEST_CHECK(manifest_add(&manifest, output_path, S("static/logo.png"), &arena, NULL) == 0);
 
+  struct OutputWriter writer = {.manifest = &manifest, .os = os_posix()};
   ptrdiff_t removed_count = -1;
-  TEST_CHECK(output_pruner_prune(&manifest, &gallery_config, os_posix(), test_arena(),
-                                 &removed_count, &log) == 0);
+  TEST_CHECK(output_pruner_prune(&writer, &gallery_config, os_posix(), test_arena(), &removed_count,
+                                 &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
   TEST_CHECK(removed_count == 0);
   TEST_CHECK(access(str_cstr(written_path, &arena), F_OK) == 0);

@@ -9,6 +9,7 @@
 
 #include "build/derivative_renderer.h"
 #include "build/job.h"
+#include "build/output_writer.h"
 #include "build/test_derivative_renderer.h"
 #include "build/test_job_arenas.h"
 #include "core/path.h"
@@ -136,7 +137,10 @@ static int generate(const struct GalleryConfig* gallery_config,
                     ptrdiff_t worker_count,
                     struct Log* log) {
   struct Arena arenas_perm = test_arena();
-  return derivative_renderer_generate(gallery_config, media, media_count, video_frames,
+  struct Manifest manifest = {0};
+  test_derivative_renderer_record_outputs(&manifest, media, media_count, &arenas_perm);
+  const struct OutputWriter writer = {.manifest = &manifest, .os = os_posix()};
+  return derivative_renderer_generate(&writer, gallery_config, media, media_count, video_frames,
                                       worker_count, test_job_arenas(worker_count, &arenas_perm),
                                       false, os_posix(), test_arena(), log);
 }

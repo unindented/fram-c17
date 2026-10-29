@@ -3,11 +3,13 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "build/output_writer.h"
 #include "build/page_renderer.h"
 #include "build/site_writer.h"
 #include "core/path_list.h"
 #include "domain/album.h"
 #include "domain/gallery_config.h"
+#include "domain/manifest.h"
 #include "os_memory.h"
 #include "shared/arena.h"
 #include "shared/buf.h"
@@ -17,6 +19,28 @@
 
 // Every test here runs against the in-memory host: the writers read templates and static files and
 // write their outputs only through `runtime/os.h`.
+
+/**
+ * @brief Initializes a writer on `os` whose manifest names `output_paths`, as the build's would.
+ *
+ * @param writer            Writer to initialize. Must not be `NULL`.
+ * @param manifest          Empty manifest that receives the paths. Must not be `NULL`.
+ * @param output_paths      Array of `output_path_count` terminated paths. Must not be `NULL`.
+ * @param output_path_count Number of paths in `output_paths`.
+ * @param os                Host the writer writes to. Must not be `NULL`.
+ * @param arena             Arena that owns the manifest's entries. Must not be `NULL`.
+ */
+static void init_writer(struct OutputWriter* writer,
+                        struct Manifest* manifest,
+                        const char* const* output_paths,
+                        ptrdiff_t output_path_count,
+                        struct Os* os,
+                        struct Arena* arena) {
+  for (ptrdiff_t i = 0; i < output_path_count; i++) {
+    TEST_CHECK(manifest_add(manifest, str_from_cstr(output_paths[i]), S("test"), arena, NULL) == 0);
+  }
+  *writer = (struct OutputWriter){.manifest = manifest, .os = os};
+}
 
 // Album pages, aggregate templates, and nested static files land at their planned destinations.
 static void test_writes_complete_output_layer(void) {
@@ -47,11 +71,17 @@ static void test_writes_complete_output_layer(void) {
   struct PathList static_paths = {0};
   struct Log log = test_log();
   path_list_push(&static_paths, S("static/icons/a.txt"), &paths);
+  static const char* const output_paths[] = {"public/index.html", "public/map.xml",
+                                             "public/nested/links.html", "public/icons/a.txt"};
+  struct Manifest manifest = {0};
+  struct OutputWriter writer;
+  init_writer(&writer, &manifest, output_paths, 4, os, &paths);
 
-  TEST_CHECK(site_writer_write_album_pages(albums, 1, rendered, os, scratch, &log) == 0);
-  TEST_CHECK(site_writer_write_aggregates(&gallery_config, albums[0], os, output, scratch, &log) ==
-             0);
-  TEST_CHECK(site_writer_copy_static_files(&gallery_config, &static_paths, os, scratch, &log) == 0);
+  TEST_CHECK(site_writer_write_album_pages(&writer, albums, 1, rendered, scratch, &log) == 0);
+  TEST_CHECK(site_writer_write_aggregates(&writer, &gallery_config, albums[0], os, output, scratch,
+                                          &log) == 0);
+  TEST_CHECK(
+      site_writer_copy_static_files(&writer, &gallery_config, &static_paths, scratch, &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
   TEST_CHECK(os_memory_is_file(os, "public/index.html", "<h1>Root</h1>"));
   TEST_CHECK(os_memory_is_file(os, "public/map.xml", "<g>Gallery &amp; Co</g>"));
@@ -68,9 +98,14 @@ static void test_write_album_pages_names_root_album_in_words(void) {
   struct Album root = {.source_dir = S(""), .title = S("Root"), .output_path = S("public")};
   const struct Album* albums[] = {&root};
   const struct RenderedPage rendered[] = {{.html = S("<h1>Root</h1>")}};
+  static const char* const output_paths[] = {"public"};
+  struct Arena arena = test_arena();
+  struct Manifest manifest = {0};
+  struct OutputWriter writer;
+  init_writer(&writer, &manifest, output_paths, 1, os, &arena);
   struct Log log = test_log();
 
-  TEST_CHECK(site_writer_write_album_pages(albums, 1, rendered, os, test_arena(), &log) == -1);
+  TEST_CHECK(site_writer_write_album_pages(&writer, albums, 1, rendered, test_arena(), &log) == -1);
   TEST_CHECK(test_log_is(&log, "failed to write output for the root album: %s ('public')\n",
                          strerror(EISDIR)));
 }
@@ -84,9 +119,14 @@ static void test_write_album_pages_quotes_sub_album_source_dir(void) {
       .source_dir = S("root album"), .title = S("root album"), .output_path = S("public")};
   const struct Album* albums[] = {&album};
   const struct RenderedPage rendered[] = {{.html = S("<h1>root album</h1>")}};
+  static const char* const output_paths[] = {"public"};
+  struct Arena arena = test_arena();
+  struct Manifest manifest = {0};
+  struct OutputWriter writer;
+  init_writer(&writer, &manifest, output_paths, 1, os, &arena);
   struct Log log = test_log();
 
-  TEST_CHECK(site_writer_write_album_pages(albums, 1, rendered, os, test_arena(), &log) == -1);
+  TEST_CHECK(site_writer_write_album_pages(&writer, albums, 1, rendered, test_arena(), &log) == -1);
   TEST_CHECK(test_log_is(&log, "failed to write output for 'root album': %s ('public')\n",
                          strerror(EISDIR)));
 }
@@ -105,10 +145,15 @@ static void test_write_aggregates_reports_write_failure(void) {
   gallery_config.aggregate_templates = aggregates;
   gallery_config.aggregate_template_count = 1;
   struct Album root = {.source_dir = S(""), .title = S("Root"), .path_to_root = S("")};
+  static const char* const output_paths[] = {"public/map.xml"};
+  struct Arena arena = test_arena();
+  struct Manifest manifest = {0};
+  struct OutputWriter writer;
+  init_writer(&writer, &manifest, output_paths, 1, os, &arena);
   struct Log log = test_log();
 
-  TEST_CHECK(site_writer_write_aggregates(&gallery_config, &root, os, test_arena(), test_arena(),
-                                          &log) == -1);
+  TEST_CHECK(site_writer_write_aggregates(&writer, &gallery_config, &root, os, test_arena(),
+                                          test_arena(), &log) == -1);
   TEST_CHECK(test_log_is(&log, "failed to write template output: %s ('public/map.xml')\n",
                          strerror(EISDIR)));
 }
@@ -126,18 +171,22 @@ static void test_copy_static_files_reports_copy_failure(void) {
   struct Arena paths = test_arena();
   struct PathList static_paths = {0};
   path_list_push(&static_paths, S("static/a.css"), &paths);
+  static const char* const output_paths[] = {"public/a.css", "public/gone.css"};
+  struct Manifest manifest = {0};
+  struct OutputWriter writer;
+  init_writer(&writer, &manifest, output_paths, 2, os, &paths);
   struct Log log = test_log();
 
-  TEST_CHECK(
-      site_writer_copy_static_files(&gallery_config, &static_paths, os, test_arena(), &log) == -1);
+  TEST_CHECK(site_writer_copy_static_files(&writer, &gallery_config, &static_paths, test_arena(),
+                                           &log) == -1);
   TEST_CHECK(
       test_log_is(&log, "failed to copy static file: %s ('public/a.css')\n", strerror(EISDIR)));
 
   static_paths = (struct PathList){0};
   path_list_push(&static_paths, S("static/gone.css"), &paths);
   log = test_log();
-  TEST_CHECK(
-      site_writer_copy_static_files(&gallery_config, &static_paths, os, test_arena(), &log) == -1);
+  TEST_CHECK(site_writer_copy_static_files(&writer, &gallery_config, &static_paths, test_arena(),
+                                           &log) == -1);
   TEST_CHECK(
       test_log_is(&log, "failed to copy static file: %s ('static/gone.css')\n", strerror(ENOENT)));
 }

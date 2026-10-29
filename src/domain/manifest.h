@@ -11,6 +11,18 @@ struct Arena;
 /** One recorded output path and the source that claims it. Defined in `manifest.c`. */
 struct ManifestEntry;
 
+/** What the build has done with one recorded output path. */
+enum ManifestMark {
+  /** Nothing yet. A path still pending after the writes is one the output writer never saw. */
+  MANIFEST_MARK_PENDING,
+
+  /** Written, or in a dry run, would be written. */
+  MANIFEST_MARK_WRITTEN,
+
+  /** Left as it is, because it is fresh. */
+  MANIFEST_MARK_KEPT,
+};
+
 /**
  * Insertion-ordered set of intended build output paths, each mapped to its producing source. A
  * zeroed manifest is empty and ready to add to.
@@ -39,9 +51,8 @@ struct Manifest {
  * The manifest copies both strings into `arena`, so the arguments need not outlive the call.
  * `manifest_add` reports a path already present as a duplicate and leaves the manifest unchanged.
  *
- * The manifest appends entries in insertion order, but that order is not reachable from outside
- * this module. `struct ManifestEntry` is incomplete and no accessor exposes it. Treat it as an
- * implementation property rather than part of this contract until one exists.
+ * The manifest keeps its entries in insertion order, the order `manifest_next_output_path` visits
+ * them in.
  *
  * Duplicate means equal after folding ASCII `A-Z` to `a-z`, so `Trips/Japan.JPG` and
  * `trips/japan.jpg` collide on every platform, as they would on a case-insensitive filesystem.
@@ -126,5 +137,30 @@ bool manifest_find_prefix_collision(const struct Manifest* manifest,
  */
 bool manifest_next_output_path(const struct Manifest* manifest, struct Str* output_path)
     __attribute__((nonnull(1, 2)));
+
+/**
+ * @brief Marks the recorded output path equal to `output_path` under ASCII case folding.
+ *
+ * It changes the entry's mark and nothing else, so jobs running at once may each mark a path of
+ * their own while the others look theirs up.
+ *
+ * @param manifest    Manifest whose entry is marked. Must not be `NULL`.
+ * @param output_path Path to mark.
+ * @param mark        Mark the entry receives.
+ * @return `0` when the path is recorded, or `-1` when it is not and nothing was marked.
+ */
+int manifest_mark(struct Manifest* manifest, struct Str output_path, enum ManifestMark mark)
+    __attribute__((nonnull(1)));
+
+/**
+ * @brief Finds the mark of the recorded output path equal to `output_path` under ASCII case
+ *        folding.
+ *
+ * @param manifest    Manifest to read. Must not be `NULL`.
+ * @param output_path Path whose mark is read.
+ * @return The path's mark, or `MANIFEST_MARK_PENDING` when it is unmarked or not recorded.
+ */
+enum ManifestMark manifest_find_mark(const struct Manifest* manifest, struct Str output_path)
+    __attribute__((nonnull(1)));
 
 #endif

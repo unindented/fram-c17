@@ -6,6 +6,7 @@
 #include <stddef.h>
 
 #include "build/job.h"
+#include "build/output_writer.h"
 #include "core/error.h"
 #include "domain/gallery_config.h"
 #include "domain/media_item.h"
@@ -66,7 +67,10 @@ static struct DecodeBudget decode_budget = {
     .len_reserved = 0,
 };
 
-/** Worker context shared by all derivative jobs. Every field is read-only to a job. */
+/**
+ * Worker context shared by all derivative jobs. Every field is read-only to a job, apart from the
+ * marks each job leaves on its own item's paths in the writer's manifest.
+ */
 struct DerivativeContext {
   /** Configured derivative sizes, crops, and qualities. Read-only during the run. */
   const struct GalleryConfig* gallery_config;
@@ -83,8 +87,11 @@ struct DerivativeContext {
    */
   struct VideoFrame* video_frames;
 
-  /** Host every job reads its source from and writes its outputs to. */
+  /** Host every job reads its source and its outputs' freshness from. */
   struct Os* os;
+
+  /** Writer every job writes its outputs through. */
+  const struct OutputWriter* writer;
 };
 
 /**
@@ -109,9 +116,9 @@ static int render_derivatives_job(ptrdiff_t index,
 /**
  * @brief Writes one media item's stale derivatives and its stale original copy.
  *
- * An output already at least as new as the source is skipped, and the source is read, decoded, and
- * oriented at most once for the whole item. Each failure is logged and the job carries on, so a
- * failing derivative does not hide a failing original copy.
+ * An output already at least as new as the source is kept, and the source is read, decoded, and
+ * oriented at most once for the whole item. A dry run reads and decodes nothing. Each failure is
+ * logged and the job carries on, so a failing derivative does not hide a failing original copy.
  *
  * @param context Shared derivative-phase state. Must not be `NULL`.
  * @param index   Media index to render.
@@ -140,6 +147,26 @@ static int render_derivatives_outputs_inspect(struct Str source_path,
                                               struct Os* os,
                                               struct OsStat* stat_out,
                                               struct Log* log) __attribute__((nonnull(2, 3, 4)));
+
+/**
+ * @brief Marks one derivative of a media item: kept when it is fresh, and written when it is stale
+ *        and the build is a dry run.
+ *
+ * A real build marks a stale derivative when it writes it. A dry run does not make one, because
+ * decoding a source and encoding its derivatives only to throw them away would make a dry run of an
+ * empty `output_dir` as slow as a build. A write of no bytes, which a dry run withholds, marks the
+ * path instead.
+ *
+ * @param writer      Writer of the build. Must not be `NULL`.
+ * @param output_path Derivative output path.
+ * @param is_stale    Whether the derivative is rewritten.
+ * @param log         Log of the job, which receives the failure. Must not be `NULL`.
+ * @return `0` on success, or `-1` when the manifest does not name `output_path`.
+ */
+static int render_derivatives_outputs_mark(const struct OutputWriter* writer,
+                                           struct Str output_path,
+                                           bool is_stale,
+                                           struct Log* log) __attribute__((nonnull(1, 4)));
 
 /**
  * @brief Reads, decodes, and orients one item's source, then writes each of its stale derivatives.
@@ -291,9 +318,10 @@ static bool is_at_least_as_new(const struct OsStat* candidate, const struct OsSt
  * @brief Resizes one region of an oriented image and writes it out as a WebP.
  *
  * The region is selected inside `oriented` rather than copied out first. The WebP is encoded into
- * `scratch` and then written whole in one `os_write`, so an encode failure writes nothing. The
- * resized image is released before returning, on success and on failure alike.
+ * `scratch` and then written whole in one `output_writer_write`, so an encode failure writes
+ * nothing. The resized image is released before returning, on success and on failure alike.
  *
+ * @param writer           Writer the output is written through. Must not be `NULL`.
  * @param oriented         Oriented source image, at its decoded scale. Must not be `NULL`.
  * @param source_x_px      Left edge of the source region, in oriented pixels.
  * @param source_y_px      Top edge of the source region, in oriented pixels.
@@ -303,13 +331,13 @@ static bool is_at_least_as_new(const struct OsStat* candidate, const struct OsSt
  * @param height_px        Output height in pixels, from 1 through `IMAGE_ENCODED_DIMENSION_MAX`.
  * @param quality          WebP quality from 1 through 100.
  * @param output_path      Destination path, whose parent directories are created as needed.
- * @param os               Host the output is written to. Must not be `NULL`.
  * @param scratch          Arena the encoded WebP is held in until it is written.
  * @param operation        Operation leading the failure message, which names `output_path`.
  * @param log              Log that receives the failure. Must not be `NULL`.
  * @return `0` on success, or `-1` on a resize, encode, or write failure.
  */
-static int write_derivative(const struct Image* oriented,
+static int write_derivative(const struct OutputWriter* writer,
+                            const struct Image* oriented,
                             ptrdiff_t source_x_px,
                             ptrdiff_t source_y_px,
                             ptrdiff_t source_width_px,
@@ -318,12 +346,12 @@ static int write_derivative(const struct Image* oriented,
                             ptrdiff_t height_px,
                             ptrdiff_t quality,
                             struct Str output_path,
-                            struct Os* os,
                             struct Arena scratch,
                             struct Str operation,
-                            struct Log* log) __attribute__((nonnull(1, 10, 13)));
+                            struct Log* log) __attribute__((nonnull(1, 2, 13)));
 
-int derivative_renderer_generate(const struct GalleryConfig* gallery_config,
+int derivative_renderer_generate(const struct OutputWriter* writer,
+                                 const struct GalleryConfig* gallery_config,
                                  struct MediaItem* const* media,
                                  ptrdiff_t media_count,
                                  struct VideoFrame* video_frames,
@@ -338,6 +366,7 @@ int derivative_renderer_generate(const struct GalleryConfig* gallery_config,
       .media = media,
       .video_frames = video_frames,
       .os = os,
+      .writer = writer,
   };
   return job_run(media_count, worker_count, worker_arenas, render_derivatives_job, &context,
                  S("generating derivatives"), (struct Str){0}, is_verbose, os, scratch, log);
@@ -404,20 +433,32 @@ static int render_derivatives_outputs(const struct DerivativeContext* context,
   // which is what lets the write loop read both arrays at the same index.
   bool is_stale[GALLERY_DERIVATIVE_COUNT_MAX] = {false};
   bool has_stale = false;
+  int rc = 0;
   for (ptrdiff_t i = 0; i < item->derivative_count; i++) {
     is_stale[i] = !is_fresh_derivative(item->derivatives[i].path, &source_stat, context->os);
     has_stale = has_stale || is_stale[i];
+    if (render_derivatives_outputs_mark(context->writer, item->derivatives[i].path, is_stale[i],
+                                        log) != 0) {
+      rc = -1;
+    }
   }
 
-  int rc = 0;
-  if (has_stale && render_derivatives_images(context, index, is_stale, scratch, log) != 0) {
+  // This and the mark above are the one place outside the output writer that asks whether the build
+  // is a dry run.
+  if (has_stale && !context->writer->is_dry_run &&
+      render_derivatives_images(context, index, is_stale, scratch, log) != 0) {
     rc = -1;
   }
-  const struct OsSource original = {.kind = OS_SOURCE_FILE, .file_path = item->source_path};
-  if (!is_fresh_original(item->original_path, &source_stat, context->os) &&
-      os_write(context->os, item->original_path, original, S("failed to copy original"), log) !=
-          0) {
-    rc = -1;
+  if (is_fresh_original(item->original_path, &source_stat, context->os)) {
+    if (output_writer_keep(context->writer, item->original_path, log) != 0) {
+      rc = -1;
+    }
+  } else {
+    const struct OsSource original = {.kind = OS_SOURCE_FILE, .file_path = item->source_path};
+    if (output_writer_write(context->writer, item->original_path, original,
+                            S("failed to copy original"), log) != 0) {
+      rc = -1;
+    }
   }
   return rc;
 }
@@ -434,6 +475,20 @@ static int render_derivatives_outputs_inspect(struct Str source_path,
   if (stat_out->is_dir) {
     return log_error(log, "failed to inspect media source: not a regular file ('%.*s')",
                      STR_FMT(source_path));
+  }
+  return 0;
+}
+
+static int render_derivatives_outputs_mark(const struct OutputWriter* writer,
+                                           struct Str output_path,
+                                           bool is_stale,
+                                           struct Log* log) {
+  if (!is_stale) {
+    return output_writer_keep(writer, output_path, log);
+  }
+  if (writer->is_dry_run) {
+    return output_writer_write(writer, output_path, (struct OsSource){0},
+                               S("failed to write derivative"), log);
   }
   return 0;
 }
@@ -555,9 +610,9 @@ static int write_stale_derivatives(const struct DerivativeContext* context,
     struct Arena operation_scratch = scratch;
     struct Buf operation = {.arena = &operation_scratch};
     buf_printf(&operation, "failed to write derivative '%.*s'", STR_FMT(derivative->name));
-    if (write_derivative(oriented, crop_x, crop_y, crop_width, crop_height, derivative->width_px,
-                         derivative->height_px, config_derivative->quality, derivative->path,
-                         context->os, operation_scratch, buf_str(&operation), log) != 0) {
+    if (write_derivative(context->writer, oriented, crop_x, crop_y, crop_width, crop_height,
+                         derivative->width_px, derivative->height_px, config_derivative->quality,
+                         derivative->path, operation_scratch, buf_str(&operation), log) != 0) {
       rc = -1;
     }
   }
@@ -620,7 +675,8 @@ static bool is_at_least_as_new(const struct OsStat* candidate, const struct OsSt
          (candidate->mtime_s == source->mtime_s && candidate->mtime_ns >= source->mtime_ns);
 }
 
-static int write_derivative(const struct Image* oriented,
+static int write_derivative(const struct OutputWriter* writer,
+                            const struct Image* oriented,
                             ptrdiff_t source_x_px,
                             ptrdiff_t source_y_px,
                             ptrdiff_t source_width_px,
@@ -629,7 +685,6 @@ static int write_derivative(const struct Image* oriented,
                             ptrdiff_t height_px,
                             ptrdiff_t quality,
                             struct Str output_path,
-                            struct Os* os,
                             struct Arena scratch,
                             struct Str operation,
                             struct Log* log) {
@@ -642,7 +697,7 @@ static int write_derivative(const struct Image* oriented,
   int rc = image_encode_webp(&resized, quality, &scratch, &webp, operation, output_path, log);
   image_free(&resized);
   if (rc == 0) {
-    rc = os_write(os, output_path, (struct OsSource){.bytes = webp}, operation, log);
+    rc = output_writer_write(writer, output_path, (struct OsSource){.bytes = webp}, operation, log);
   }
   return rc;
 }

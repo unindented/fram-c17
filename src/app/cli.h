@@ -54,6 +54,9 @@ struct CliOptions {
   /** Whether the caller requested progress and status messages. */
   bool is_verbose;
 
+  /** Whether the build only reports what it would write, keep, or remove, changing nothing. */
+  bool is_dry_run;
+
   /**
    * Failure diagnostic, non-empty exactly when `action` is `CLI_ACTION_ERROR`. It is a formatted
    * copy in the arena `cli_parse` was given, so it holds no pointer into `argv` or into copt's

@@ -280,6 +280,34 @@ static void test_next_output_path_visits_paths_in_recorded_order(void) {
   TEST_CHECK(str_eq(output_path, paths[PATH_COUNT - 1]));
 }
 
+// Every recorded path starts pending. A mark reaches the entry through any ASCII-case spelling of
+// its path, and leaves every other entry as it was.
+static void test_marks_recorded_path(void) {
+  struct Arena arena = test_arena();
+  struct Manifest manifest = {0};
+  TEST_CHECK(manifest_add(&manifest, S("public/About.html"), S("about.md"), &arena, NULL) == 0);
+  TEST_CHECK(manifest_add(&manifest, S("public/index.html"), S("index.md"), &arena, NULL) == 0);
+  TEST_CHECK(manifest_find_mark(&manifest, S("public/About.html")) == MANIFEST_MARK_PENDING);
+  TEST_CHECK(manifest_find_mark(&manifest, S("public/index.html")) == MANIFEST_MARK_PENDING);
+
+  TEST_CHECK(manifest_mark(&manifest, S("public/About.html"), MANIFEST_MARK_WRITTEN) == 0);
+  TEST_CHECK(manifest_find_mark(&manifest, S("public/about.html")) == MANIFEST_MARK_WRITTEN);
+  TEST_CHECK(manifest_mark(&manifest, S("PUBLIC/ABOUT.HTML"), MANIFEST_MARK_KEPT) == 0);
+  TEST_CHECK(manifest_find_mark(&manifest, S("public/About.html")) == MANIFEST_MARK_KEPT);
+  TEST_CHECK(manifest_find_mark(&manifest, S("public/index.html")) == MANIFEST_MARK_PENDING);
+}
+
+// A path that was never recorded cannot be marked, and reads as pending.
+static void test_mark_rejects_unrecorded_path(void) {
+  struct Arena arena = test_arena();
+  struct Manifest manifest = {0};
+  TEST_CHECK(manifest_mark(&manifest, S("public/index.html"), MANIFEST_MARK_WRITTEN) == -1);
+  TEST_CHECK(manifest_add(&manifest, S("public/index.html"), S("index.md"), &arena, NULL) == 0);
+  TEST_CHECK(manifest_mark(&manifest, S("public/other.html"), MANIFEST_MARK_WRITTEN) == -1);
+  TEST_CHECK(manifest_find_mark(&manifest, S("public/other.html")) == MANIFEST_MARK_PENDING);
+  TEST_CHECK(manifest_find_mark(&manifest, S("public/index.html")) == MANIFEST_MARK_PENDING);
+}
+
 TEST_LIST = {
     {"inserts then detects duplicate", test_inserts_then_detects_duplicate},
     {"detects ASCII-folded duplicate", test_detects_ascii_folded_duplicate},
@@ -294,5 +322,7 @@ TEST_LIST = {
     {"no prefix collision among distinct files", test_no_prefix_collision_among_distinct_files},
     {"next output path visits paths in recorded order",
      test_next_output_path_visits_paths_in_recorded_order},
+    {"marks recorded path", test_marks_recorded_path},
+    {"mark rejects unrecorded path", test_mark_rejects_unrecorded_path},
     {NULL, NULL},
 };

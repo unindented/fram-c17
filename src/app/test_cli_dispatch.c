@@ -2,6 +2,7 @@
 #define _DEFAULT_SOURCE
 
 #include <acutest.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -15,6 +16,7 @@
 #include "runtime/fs.h"
 #include "runtime/os.h"
 #include "shared/arena.h"
+#include "shared/buf.h"
 #include "shared/log.h"
 #include "shared/str.h"
 #include "test_jpeg_fixture.h"
@@ -179,17 +181,33 @@ static void test_config_command_is_dispatched(void) {
 }
 
 // The `build` command is dispatched to `cmd_build_run` with the parsed options attached, so the
-// worker count and the verbose flag reach the build rather than being dropped on the way. The
-// verbose phase lines naming the requested count are the only externally visible evidence that both
-// fields were carried across. The test asks for one worker, so a dropped count would show the
-// detected count, on a host with more than one core. One worker also finishes the jobs in order, so
-// the progress lines can be compared.
+// worker count, the verbose flag and the dry-run flag reach the build rather than being dropped on
+// the way. A dry run prints its listing and leaves no `public/`, which only a carried flag
+// explains. The verbose phase lines naming the requested count are the only externally visible
+// evidence that the other two fields were carried across. The test asks for one worker, so a
+// dropped count would show the detected count, on a host with more than one core. One worker also
+// finishes the jobs in order, so the progress lines can be compared.
 static void test_build_command_receives_parsed_options(void) {
   char root_dir[] = "/tmp/fram-dispatch-gallery.XXXXXX";
   int saved_dir_fd = -1;
   if (enter_gallery_fixture(root_dir, &saved_dir_fd) != 0) {
     return;
   }
+
+  char* dry_run_argv[] = {"fram", "build", "--dry-run", NULL};
+  struct DispatchOutput dry_run_out;
+  TEST_CHECK(dispatch_capturing(3, dry_run_argv, &dry_run_out) == EXIT_CODE_OK);
+  // The derivative lines name the recipe directory, which every change to the default derivatives
+  // renames, so only the first and the last line are spelled out.
+  static const char first_line[] = "write\tpublic/index.html\n";
+  static const char last_line[] = "write\tpublic/_fram/originals/b-jpg.jpg\n";
+  const size_t stdout_len = strlen(dry_run_out.stdout_out);
+  TEST_CHECK(strncmp(dry_run_out.stdout_out, first_line, sizeof(first_line) - 1) == 0);
+  TEST_CHECK(stdout_len >= sizeof(last_line) - 1 &&
+             strcmp(dry_run_out.stdout_out + stdout_len - (sizeof(last_line) - 1), last_line) == 0);
+  TEST_MSG("stdout: '%s'", dry_run_out.stdout_out);
+  TEST_CHECK(dry_run_out.stderr_out[0] == '\0');
+  TEST_CHECK(access("public", F_OK) != 0);
 
   char* argv[] = {"fram", "build", "--verbose", "--workers=1", NULL};
   struct DispatchOutput dispatch_out;
@@ -257,6 +275,40 @@ static void test_version_write_failure_reports_failure(void) {
   TEST_CHECK(strcmp(stderr_out, "") == 0);
 }
 
+// A dry run whose listing cannot be printed fails the build with a diagnostic, rather than
+// reporting success for a listing nobody saw. A read-only `stdout` makes the print fail with
+// `EBADF`.
+static void test_dry_run_print_failure_reports_failure(void) {
+  char root_dir[] = "/tmp/fram-dispatch-gallery.XXXXXX";
+  int saved_dir_fd = -1;
+  if (enter_gallery_fixture(root_dir, &saved_dir_fd) != 0) {
+    return;
+  }
+
+  char* argv[] = {"fram", "build", "--dry-run", NULL};
+  enum ExitCode rc = (enum ExitCode)TEST_PLUMBING_FAILED;
+  bool has_plumbing_failed = true;
+  char stderr_out[4096] = "";
+  struct StreamCapture stdout_capture;
+  struct StreamCapture stderr_capture;
+  if (capture_begin_unwritable(stdout, &stdout_capture) == 0) {
+    if (capture_begin(stderr, &stderr_capture) == 0) {
+      rc = cli_dispatch(3, argv, os_posix());
+      has_plumbing_failed = capture_end(&stderr_capture, stderr_out, sizeof(stderr_out)) != 0;
+    }
+    has_plumbing_failed = capture_end(&stdout_capture, NULL, 0) != 0 || has_plumbing_failed;
+  }
+
+  TEST_CHECK(!has_plumbing_failed);
+  TEST_CHECK(rc == EXIT_CODE_FAILURE);
+  struct Arena arena = test_arena();
+  struct Buf expected = {.arena = &arena};
+  buf_printf(&expected, "failed to print dry run: %s\n", strerror(EBADF));
+  TEST_CHECK(strcmp(stderr_out, buf_cstr(&expected)) == 0);
+  TEST_MSG("stderr: '%s'", stderr_out);
+  leave_gallery_fixture(root_dir, saved_dir_fd);
+}
+
 TEST_LIST = {
     {"version action reports ok", test_version_action_reports_ok},
     {"help action reports ok", test_help_action_reports_ok},
@@ -264,5 +316,6 @@ TEST_LIST = {
     {"build command receives parsed options", test_build_command_receives_parsed_options},
     {"parse error reports usage code", test_parse_error_reports_usage_code},
     {"version write failure reports failure", test_version_write_failure_reports_failure},
+    {"dry run print failure reports failure", test_dry_run_print_failure_reports_failure},
     {NULL, NULL},
 };

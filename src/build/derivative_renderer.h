@@ -12,6 +12,7 @@ struct JobArenas;
 struct Log;
 struct MediaItem;
 struct Os;
+struct OutputWriter;
 struct VideoFrame;
 
 /**
@@ -24,12 +25,19 @@ struct VideoFrame;
  * job reads its source into a copy of its worker's scratch and allocates its decoded pixels with
  * `malloc`, under a budget shared by every worker.
  *
+ * Every output goes through `writer`: a fresh derivative or original copy is marked kept, and a
+ * stale one written. A dry run marks each stale output written without making it, so it decodes and
+ * encodes nothing.
+ *
  * Call this only after `manifest_builder_populate` accepts every output path. Jobs write
- * concurrently, and the manifest is what guarantees that no two of them target the same file.
+ * concurrently, and the manifest is what guarantees that no two of them target the same file, so
+ * each job marks only its own item's paths in it.
  *
  * Each finished job reports progress when `is_verbose`. Failing jobs' errors go to `log` in media
  * order, as `job_run` collects them.
  *
+ * @param writer         Writer every output is written through, by every worker at once. Must not
+ *                       be `NULL`.
  * @param gallery_config Configured derivative sizes, crops, and qualities shared by every job. Must
  *                       not be `NULL`.
  * @param media          Probed media items, one job per item. Must not be `NULL`.
@@ -39,15 +47,16 @@ struct VideoFrame;
  * @param worker_count   Requested worker threads, as for `pool_run`.
  * @param worker_arenas  One `JobArenas` per requested worker, as for `job_run`. Must not be `NULL`.
  * @param is_verbose     Whether progress is printed to `stderr`.
- * @param os             Host the sources and frames are read from, the outputs written to and
- *                       progress printed on, by every worker at once. Must not be `NULL`.
+ * @param os             Host the sources, frames and outputs are read from and progress printed on,
+ *                       by every worker at once. Must not be `NULL`.
  * @param scratch        Arena for the phase's own bookkeeping, as for `job_run`.
  * @param log            Log that receives the collected derivative errors. Its arena must be none
  *                       of the others. Must not be `NULL`.
  * @return `0` when every job succeeded, or `-1` when a derivative job failed or the worker pool
  *         could not start.
  */
-int derivative_renderer_generate(const struct GalleryConfig* gallery_config,
+int derivative_renderer_generate(const struct OutputWriter* writer,
+                                 const struct GalleryConfig* gallery_config,
                                  struct MediaItem* const* media,
                                  ptrdiff_t media_count,
                                  struct VideoFrame* video_frames,
@@ -56,7 +65,7 @@ int derivative_renderer_generate(const struct GalleryConfig* gallery_config,
                                  bool is_verbose,
                                  struct Os* os,
                                  struct Arena scratch,
-                                 struct Log* log) __attribute__((nonnull(1, 2, 4, 6, 8, 10)));
+                                 struct Log* log) __attribute__((nonnull(1, 2, 3, 5, 7, 9, 11)));
 
 /**
  * @brief Returns the scale a source is decoded at to write its stale derivatives.

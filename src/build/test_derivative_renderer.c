@@ -1,15 +1,18 @@
 #include <acutest.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "build/derivative_renderer.h"
 #include "build/job.h"
+#include "build/output_writer.h"
 #include "build/test_derivative_renderer.h"
 #include "build/test_job_arenas.h"
 #include "core/error.h"
 #include "domain/gallery_config.h"
+#include "domain/manifest.h"
 #include "domain/media_item.h"
 #include "formats/image.h"
 #include "os_memory.h"
@@ -174,6 +177,41 @@ static bool is_same_mtime(const struct OsStat* a, const struct OsStat* b) {
 }
 
 /**
+ * @brief Runs a derivative phase over fresh worker arenas through a writer whose manifest names
+ *        every output of `media`.
+ *
+ * @param gallery_config Configured derivatives shared by every job. Must not be `NULL`.
+ * @param media          Media items, one job per item. Must not be `NULL`.
+ * @param media_count    Number of items in `media`.
+ * @param video_frames   Video frame slots, one per item in `media`. Must not be `NULL`.
+ * @param worker_count   Number of worker threads to request.
+ * @param is_verbose     Whether each finished job prints a progress line.
+ * @param is_dry_run     Whether the writer withholds its writes.
+ * @param os             Host holding the sources, which receives the outputs. Must not be `NULL`.
+ * @param manifest       Empty manifest that receives every output path and the marks. Must not be
+ *                       `NULL`.
+ * @param log            Log that receives derivative errors. Must not be `NULL`.
+ * @return The renderer result.
+ */
+static int generate_with(const struct GalleryConfig* gallery_config,
+                         struct MediaItem* const* media,
+                         ptrdiff_t media_count,
+                         struct VideoFrame* video_frames,
+                         ptrdiff_t worker_count,
+                         bool is_verbose,
+                         bool is_dry_run,
+                         struct Os* os,
+                         struct Manifest* manifest,
+                         struct Log* log) {
+  struct Arena arenas_perm = test_arena();
+  test_derivative_renderer_record_outputs(manifest, media, media_count, &arenas_perm);
+  const struct OutputWriter writer = {.manifest = manifest, .os = os, .is_dry_run = is_dry_run};
+  return derivative_renderer_generate(&writer, gallery_config, media, media_count, video_frames,
+                                      worker_count, test_job_arenas(worker_count, &arenas_perm),
+                                      is_verbose, os, test_arena(), log);
+}
+
+/**
  * @brief Runs a derivative phase over fresh worker arenas, reading sources up to the media read
  *        limit.
  *
@@ -195,10 +233,9 @@ static int generate(const struct GalleryConfig* gallery_config,
                     bool is_verbose,
                     struct Os* os,
                     struct Log* log) {
-  struct Arena arenas_perm = test_arena();
-  return derivative_renderer_generate(gallery_config, media, media_count, video_frames,
-                                      worker_count, test_job_arenas(worker_count, &arenas_perm),
-                                      is_verbose, os, test_arena(), log);
+  struct Manifest manifest = {0};
+  return generate_with(gallery_config, media, media_count, video_frames, worker_count, is_verbose,
+                       false, os, &manifest, log);
 }
 
 /**
@@ -437,6 +474,59 @@ static void test_generate_avoids_decode_when_derivatives_fresh(void) {
   }
   TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
+}
+
+// After a build, a dry run marks every derivative and the original kept, and reads no source: a
+// read of it would fail.
+static void test_dry_run_marks_fresh_outputs_kept(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct MediaItem item;
+  struct Str jpeg = {0};
+  struct GalleryConfig config;
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
+  struct MediaItem* media[] = {&item};
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
+  if (!TEST_CHECK(test_jpeg_encode(8, 4, &arena, &jpeg) == 0)) {
+    return;
+  }
+  os_memory_write_bytes(os, item.source_path, jpeg);
+  TEST_CHECK(generate(&config, media, 1, frames, 1, false, os, &log) == 0);
+  os_memory_fail(os, OS_MEMORY_OP_READ, "photos/source.jpg", EACCES);
+
+  struct Manifest manifest = {0};
+  TEST_CHECK(generate_with(&config, media, 1, frames, 1, false, true, os, &manifest, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  for (ptrdiff_t i = 0; i < item.derivative_count; i++) {
+    TEST_CHECK(manifest_find_mark(&manifest, item.derivatives[i].path) == MANIFEST_MARK_KEPT);
+  }
+  TEST_CHECK(manifest_find_mark(&manifest, item.original_path) == MANIFEST_MARK_KEPT);
+}
+
+// A dry run marks every stale derivative and the stale original written without making any of them,
+// so a source that is not a JPEG, which a build fails to decode, passes and leaves no file.
+static void test_dry_run_marks_stale_outputs_written_without_making_them(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct MediaItem item;
+  struct GalleryConfig config;
+  test_derivative_renderer_init_config(&config, 2, 2, 8, 8, 82);
+  struct MediaItem* media[] = {&item};
+  struct VideoFrame frames[1] = {{0}};
+  struct Log log = test_log();
+  init_item(&item, MEDIA_KIND_IMAGE, "source.jpg", &arena);
+  os_memory_write(os, "photos/source.jpg", "not a JPEG");
+
+  struct Manifest manifest = {0};
+  TEST_CHECK(generate_with(&config, media, 1, frames, 1, false, true, os, &manifest, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  for (ptrdiff_t i = 0; i < item.derivative_count; i++) {
+    TEST_CHECK(manifest_find_mark(&manifest, item.derivatives[i].path) == MANIFEST_MARK_WRITTEN);
+  }
+  TEST_CHECK(manifest_find_mark(&manifest, item.original_path) == MANIFEST_MARK_WRITTEN);
+  TEST_CHECK(!os_memory_has_path(os, "public"));
 }
 
 // Image sources apply EXIF before resizing.
@@ -785,6 +875,9 @@ TEST_LIST = {
     {"generate refreshes outputs independently", test_generate_refreshes_outputs_independently},
     {"generate avoids decode when derivatives fresh",
      test_generate_avoids_decode_when_derivatives_fresh},
+    {"dry run marks fresh outputs kept", test_dry_run_marks_fresh_outputs_kept},
+    {"dry run marks stale outputs written without making them",
+     test_dry_run_marks_stale_outputs_written_without_making_them},
     {"generate applies image exif orientation", test_generate_applies_image_exif_orientation},
     {"generate orients large source before giving it back",
      test_generate_orients_large_source_before_giving_it_back},

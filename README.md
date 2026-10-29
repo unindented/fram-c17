@@ -19,7 +19,7 @@ Download a prebuilt binary from the [Releases](https://github.com/unindented/fra
 
 `fram` is command-based:
 
-- `fram build`: Generate the gallery in the configured output directory. Use `-w, --workers N` to set the most worker threads the build runs. The value must be a positive integer. By default, the tool uses the detected CPU count. A build never runs more workers than it has media files or albums, whichever is more, or more than four for each online CPU. Use `-v, --verbose` to print build progress to `stderr`.
+- `fram build`: Generate the gallery in the configured output directory. Use `-w, --workers N` to set the most worker threads the build runs. The value must be a positive integer. By default, the tool uses the detected CPU count. A build never runs more workers than it has media files or albums, whichever is more, or more than four for each online CPU. Use `-n, --dry-run` to report what the build would change without changing it, as [Dry run](#dry-run) describes. Use `-v, --verbose` to print build progress to `stderr`.
 - `fram config`: Print the resolved project configuration as TOML.
 
 Run these commands for help:
@@ -27,6 +27,33 @@ Run these commands for help:
 - `fram --version` (or `-V`): Print the version.
 - `fram --help` (or `-h`): Print the list of available commands.
 - `fram <command> --help`: Print the help for one command.
+
+### Dry run
+
+`fram build --dry-run` runs every phase of a build, probing every source and rendering every page, but changes nothing in `output_dir` and does not create it. It does not make derivatives either: it only checks which ones are current. It then prints one line to `stdout` for each path the build would change or keep, as a mark, a tab, and the path. An abridged listing:
+
+```
+write	public/album/index.html
+keep	public/_fram/v2-s-120x120c-q70-m-1200x800-q85-f1000/album/one-jpg-m.webp
+keep	public/_fram/originals/album/one-jpg.jpg
+remove	public/_fram/v1-s-120x120c-q70-m-1200x800-q85-f1000
+remove	public/_fram/v1-s-120x120c-q70-m-1200x800-q85-f1000/album
+remove	public/_fram/v1-s-120x120c-q70-m-1200x800-q85-f1000/album/one-jpg-m.webp
+```
+
+- `write`: an output the build would write.
+- `keep`: a derivative or copied original the build would leave as it is, because it is current.
+- `remove`: a path that the build would remove because the current inputs no longer produce it, directories included.
+
+The `write` and `keep` lines come first, in the order the build plans them: each album's outputs in album order, then aggregates, then static files. The `remove` lines follow, sorted. `cut -f2-` gives the bare paths for `sort`, `diff`, or `comm`. A dry run reports a failure exactly as a build does, on `stderr` and with the same exit code, and then prints no listing. With `-v`, progress still goes to `stderr`, so the listing stays clean to pipe.
+
+A dry run that passes does not promise that the build will. It writes nothing, so it cannot find these failures:
+
+- No permission to write, or a full disk.
+- A static file or original that cannot be read. A dry run opens no file that it would copy.
+- An old file where a new output needs a directory, or an old directory where a new output needs a file, such as `public/blog` becoming `public/blog/index.html`.
+- An `output_dir` that exists but is not a usable directory.
+- A source image that is broken past its header. A dry run does not decode images.
 
 ### Gallery layout
 

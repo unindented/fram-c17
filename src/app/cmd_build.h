@@ -22,6 +22,12 @@ struct BuildOptions {
 
   /** Whether to print phase progress and status messages to `stderr`. */
   bool is_verbose;
+
+  /**
+   * Whether to run every phase but change nothing under `output_dir`, printing to `stdout` what the
+   * build would write, keep, and remove.
+   */
+  bool is_dry_run;
 };
 
 /**
@@ -52,7 +58,9 @@ enum ExitCode cmd_build_run(const struct BuildOptions* options, struct Os* os)
  * path-limit failure in the album skeleton, or, once the skeleton is planned, every bad config key,
  * every source that cannot be probed, and every output collision, in that order, sources in walk
  * order. A skeleton error stops the build before the probe, because the later phases read the
- * skeleton. It stops before writing anything if any error was recorded.
+ * skeleton. It stops before writing anything if any error was recorded. A dry run runs the same
+ * phases, changes nothing under `output_dir`, and prints to `stdout` what it would have written,
+ * kept, and removed.
  *
  * The main thread's data that outlives a phase, from the configuration and the source paths to the
  * manifest, goes in `perm`, and its temporaries and a parallel phase's job logs in `scratch`. Each

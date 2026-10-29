@@ -5,10 +5,14 @@
 #include <stddef.h>
 
 #include "domain/gallery_config.h"
+#include "domain/manifest.h"
+#include "domain/media_item.h"
+#include "shared/arena.h"
 #include "shared/str.h"
 
 // This is header-only and `static inline` so that the image and the video tests of the derivative
-// phase, two executables, share one configuration without a separate test library to link.
+// phase, two executables, share one configuration and one manifest without a separate test library
+// to link.
 
 /**
  * @brief Initializes a configuration with the three derivatives each test's `init_item` plans.
@@ -54,6 +58,36 @@ static inline void test_derivative_renderer_init_config(struct GalleryConfig* co
       .derivatives = derivatives,
       .derivative_count = 3,
   };
+}
+
+/**
+ * @brief Records every derivative and original path of `media` in `manifest`, as the build's
+ *        manifest records them, so the phase's writer accepts each one.
+ *
+ * Items that share a path record it once.
+ *
+ * @param manifest    Manifest that receives the paths. Must not be `NULL`.
+ * @param media       Media items whose outputs are recorded. Must not be `NULL`.
+ * @param media_count Number of items in `media`.
+ * @param arena       Arena that owns the manifest's entries. Must not be `NULL`.
+ */
+static inline void test_derivative_renderer_record_outputs(struct Manifest* manifest,
+                                                           struct MediaItem* const* media,
+                                                           ptrdiff_t media_count,
+                                                           struct Arena* arena)
+    __attribute__((nonnull(1, 2, 4)));
+
+static inline void test_derivative_renderer_record_outputs(struct Manifest* manifest,
+                                                           struct MediaItem* const* media,
+                                                           ptrdiff_t media_count,
+                                                           struct Arena* arena) {
+  for (ptrdiff_t i = 0; i < media_count; i++) {
+    for (ptrdiff_t j = 0; j < media[i]->derivative_count; j++) {
+      (void)manifest_add(manifest, media[i]->derivatives[j].path, media[i]->source_path, arena,
+                         NULL);
+    }
+    (void)manifest_add(manifest, media[i]->original_path, media[i]->source_path, arena, NULL);
+  }
 }
 
 #endif

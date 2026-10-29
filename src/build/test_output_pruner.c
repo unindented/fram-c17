@@ -1,9 +1,12 @@
 #include <acutest.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <string.h>
 
 #include "build/output_pruner.h"
+#include "build/output_writer.h"
+#include "core/path_list.h"
 #include "domain/gallery_config.h"
 #include "domain/manifest.h"
 #include "os_memory.h"
@@ -45,7 +48,8 @@ static struct Os* init_pruner_fixture(struct GalleryConfig* gallery_config,
 }
 
 /**
- * @brief Prunes the fixture's `output_dir` and checks the result and the number removed.
+ * @brief Prunes the fixture's `output_dir` through a writer that removes, and checks the result and
+ *        the number removed.
  *
  * @param manifest       Outputs of the build. Must not be `NULL`.
  * @param gallery_config Configuration of the build. Must not be `NULL`.
@@ -54,17 +58,34 @@ static struct Os* init_pruner_fixture(struct GalleryConfig* gallery_config,
  * @param removed_count  Number of entries the prune must report removed.
  * @param log            Log that receives the failures. Must not be `NULL`.
  */
-static void check_prune(const struct Manifest* manifest,
+static void check_prune(struct Manifest* manifest,
                         const struct GalleryConfig* gallery_config,
                         struct Os* os,
                         int expected_rc,
                         ptrdiff_t removed_count,
                         struct Log* log) {
+  struct OutputWriter writer = {.manifest = manifest, .os = os};
   ptrdiff_t removed_count_out = -1;
-  TEST_CHECK(output_pruner_prune(manifest, gallery_config, os, test_arena(), &removed_count_out,
+  TEST_CHECK(output_pruner_prune(&writer, gallery_config, os, test_arena(), &removed_count_out,
                                  log) == expected_rc);
   TEST_CHECK(removed_count_out == removed_count);
   TEST_MSG("removed: %td", removed_count_out);
+}
+
+/**
+ * @brief Reports whether `paths` holds `path`.
+ *
+ * @param paths Paths to search. Must not be `NULL`.
+ * @param path  Terminated path to look for. Must not be `NULL`.
+ * @return `true` when one of `paths` is `path`.
+ */
+static bool is_recorded(const struct PathList* paths, const char* path) {
+  for (ptrdiff_t i = 0; i < paths->count; i++) {
+    if (str_eq(paths->items[i], str_from_cstr(path))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Every entry the build did not write is removed, a stale directory tree with everything in it, and
@@ -102,13 +123,57 @@ static void test_empties_output_dir_without_outputs(void) {
   struct Manifest manifest = {0};
   struct Arena arena = test_arena();
   struct Os* os = init_pruner_fixture(&gallery_config, &manifest, &arena);
-  const struct Manifest empty_manifest = {0};
+  struct Manifest empty_manifest = {0};
 
   struct Log log = test_log();
   check_prune(&empty_manifest, &gallery_config, os, 0, 3, &log);
   TEST_CHECK(test_log_is_empty(&log));
   TEST_CHECK(os_memory_files(os, "public").count == 0);
   TEST_CHECK(os_memory_has_path(os, "public"));
+}
+
+// An `output_dir` that does not exist, as a dry run of a first build leaves it, has nothing stale
+// in it, so the prune removes nothing and reports nothing.
+static void test_accepts_missing_output_dir(void) {
+  struct GalleryConfig gallery_config;
+  gallery_config_init(&gallery_config);
+  gallery_config.output_dir = S("public");
+  struct Os* os = os_memory();
+  struct Manifest manifest = {0};
+  struct Arena arena = test_arena();
+  TEST_CHECK(manifest_add(&manifest, S("public/index.html"), S("content/index.md"), &arena, NULL) ==
+             0);
+
+  struct Log log = test_log();
+  check_prune(&manifest, &gallery_config, os, 0, 0, &log);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(!os_memory_has_path(os, "public"));
+}
+
+// A dry run's writer records every entry the prune would remove, a stale directory with what is in
+// it, counts each one as removed, and leaves all of them in place.
+static void test_dry_run_records_stale_entries_and_keeps_them(void) {
+  struct GalleryConfig gallery_config;
+  struct Manifest manifest = {0};
+  struct Arena arena = test_arena();
+  struct Os* os = init_pruner_fixture(&gallery_config, &manifest, &arena);
+  os_memory_write(os, "public/old.html", "old");
+  os_memory_write(os, "public/old-section/page.html", "old");
+  struct OutputWriter writer = {
+      .manifest = &manifest, .os = os, .is_dry_run = true, .perm = &arena};
+
+  struct Log log = test_log();
+  ptrdiff_t removed_count = -1;
+  TEST_CHECK(
+      output_pruner_prune(&writer, &gallery_config, os, test_arena(), &removed_count, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(removed_count == 3);
+  TEST_CHECK(writer.removed_paths.count == 3);
+  TEST_CHECK(is_recorded(&writer.removed_paths, "public/old.html"));
+  TEST_CHECK(is_recorded(&writer.removed_paths, "public/old-section/page.html"));
+  TEST_CHECK(is_recorded(&writer.removed_paths, "public/old-section"));
+  TEST_CHECK(os_memory_is_file(os, "public/old.html", "old"));
+  TEST_CHECK(os_memory_is_file(os, "public/old-section/page.html", "old"));
 }
 
 // A symlink is removed as a link and never followed, so what it points to outside `output_dir`
@@ -219,6 +284,9 @@ static void test_reports_uninspectable_entry_once(void) {
 TEST_LIST = {
     {"removes stale entries and keeps outputs", test_removes_stale_entries_and_keeps_outputs},
     {"empties output dir without outputs", test_empties_output_dir_without_outputs},
+    {"accepts missing output dir", test_accepts_missing_output_dir},
+    {"dry run records stale entries and keeps them",
+     test_dry_run_records_stale_entries_and_keeps_them},
     {"removes links without touching their targets",
      test_removes_links_without_touching_their_targets},
     {"keeps input root inside output dir", test_keeps_input_root_inside_output_dir},

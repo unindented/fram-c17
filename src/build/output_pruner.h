@@ -7,8 +7,8 @@
 
 struct GalleryConfig;
 struct Log;
-struct Manifest;
 struct Os;
+struct OutputWriter;
 
 /**
  * @brief Removes every entry below `output_dir` that the build did not write and does not pass
@@ -23,22 +23,26 @@ struct Os;
  * `static_dir`, such as a mount of one inside `output_dir`, is neither entered nor removed. A stale
  * directory is removed once everything inside it is.
  *
+ * Every removal goes through `writer`, so a dry run removes nothing and records what it would
+ * remove instead, and an `output_dir` that does not exist, which only a dry run leaves, has nothing
+ * to remove.
+ *
  * A failure to list a directory or remove an entry is reported, and the prune goes on with the rest
  * of the tree. A directory that a failure left non-empty is not reported again, because its removal
  * would fail for the same cause.
  *
- * @param manifest          Every output path of the build, each joined onto `output_dir`. Must not
- *                          be `NULL`.
+ * @param writer            Writer of the build, whose manifest names every output path, each joined
+ *                          onto `output_dir`, and which makes the removals. Must not be `NULL`.
  * @param gallery_config    Configuration supplying `output_dir` and the input roots. Must not be
  *                          `NULL`.
- * @param os                Host the output tree is on. Must not be `NULL`.
+ * @param os                Host the output tree is read from. Must not be `NULL`.
  * @param scratch           Arena for the kept identities and the listings.
  * @param removed_count_out Receives the number of entries removed, directories included. Must not
  *                          be `NULL`.
  * @param log               Log that receives every failure. Must not be `NULL`.
  * @return `0` when every stale entry was removed, or `-1` when one could not be listed or removed.
  */
-int output_pruner_prune(const struct Manifest* manifest,
+int output_pruner_prune(struct OutputWriter* writer,
                         const struct GalleryConfig* gallery_config,
                         struct Os* os,
                         struct Arena scratch,

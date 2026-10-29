@@ -32,6 +32,12 @@ struct ManifestEntry {
 
   /** Diagnostic source label owned by the manifest's arena. */
   struct Str source_label;
+
+  /**
+   * What the build has done with `output_path`. A plain field rather than a bit-field, so a job
+   * marking its own entry writes no byte that another job's lookup reads.
+   */
+  enum ManifestMark mark;
 };
 
 /**
@@ -161,6 +167,22 @@ bool manifest_next_output_path(const struct Manifest* manifest, struct Str* outp
   }
   *output_path = entry->output_path;
   return true;
+}
+
+int manifest_mark(struct Manifest* manifest, struct Str output_path, enum ManifestMark mark) {
+  struct ManifestEntry* parent = NULL;
+  ptrdiff_t digit = 0;
+  struct ManifestEntry* entry = descend_trie(manifest, output_path, &parent, &digit);
+  if (entry == NULL) {
+    return -1;
+  }
+  entry->mark = mark;
+  return 0;
+}
+
+enum ManifestMark manifest_find_mark(const struct Manifest* manifest, struct Str output_path) {
+  const struct ManifestEntry* entry = lookup_entry(manifest, output_path);
+  return entry == NULL ? MANIFEST_MARK_PENDING : entry->mark;
 }
 
 static struct ManifestEntry* descend_trie(const struct Manifest* manifest,

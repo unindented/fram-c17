@@ -1,9 +1,11 @@
 #include "build/output_pruner.h"
 
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
 
+#include "build/output_writer.h"
 #include "core/error.h"
 #include "core/path.h"
 #include "domain/gallery_config.h"
@@ -34,8 +36,11 @@ struct Prune {
   /** Number of identities in `root_items`. */
   ptrdiff_t root_count;
 
-  /** Host the output tree is on. */
+  /** Host the output tree is read from. */
   struct Os* os;
+
+  /** Writer that makes every removal. */
+  struct OutputWriter* writer;
 
   /** Number of entries removed so far. */
   ptrdiff_t removed_count;
@@ -127,14 +132,21 @@ static bool is_kept(const struct Prune* prune, struct Str path) __attribute__((n
 static bool is_input_root(const struct Prune* prune, const struct OsIdentity* identity)
     __attribute__((nonnull(1, 2)));
 
-int output_pruner_prune(const struct Manifest* manifest,
+int output_pruner_prune(struct OutputWriter* writer,
                         const struct GalleryConfig* gallery_config,
                         struct Os* os,
                         struct Arena scratch,
                         ptrdiff_t* removed_count_out,
                         struct Log* log) {
-  struct Prune prune = {.os = os, .log = log};
-  claim_kept_outputs(&prune, manifest, gallery_config->output_dir, &scratch);
+  // A dry run withholds the creation of `output_dir`, so a first build's dry run reaches here
+  // without one, and nothing is stale.
+  struct OsStat st;
+  if (os_stat(os, gallery_config->output_dir, &st) != 0 && errno == ENOENT) {
+    *removed_count_out = 0;
+    return 0;
+  }
+  struct Prune prune = {.os = os, .writer = writer, .log = log};
+  claim_kept_outputs(&prune, writer->manifest, gallery_config->output_dir, &scratch);
   claim_input_roots(&prune, gallery_config);
   (void)prune_dir(&prune, gallery_config->output_dir, scratch);
   *removed_count_out = prune.removed_count;
@@ -240,7 +252,8 @@ static bool prune_dir_entry(struct Prune* prune,
       if (is_kept(prune, entry_path)) {
         return false;
       }
-      if (os_remove(prune->os, entry_path, S("failed to remove stale output"), prune->log) != 0) {
+      if (output_writer_remove(prune->writer, entry_path, S("failed to remove stale output"),
+                               prune->log) != 0) {
         prune->is_failed = true;
         return false;
       }
@@ -260,8 +273,8 @@ static bool prune_dir_entry(struct Prune* prune,
       if (!prune_dir(prune, entry_path, scratch)) {
         return false;
       }
-      if (os_remove_dir(prune->os, entry_path, S("failed to remove stale output"), prune->log) !=
-          0) {
+      if (output_writer_remove_dir(prune->writer, entry_path, S("failed to remove stale output"),
+                                   prune->log) != 0) {
         prune->is_failed = true;
         return false;
       }
