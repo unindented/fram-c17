@@ -314,7 +314,7 @@ int os_remove_dir(struct Os* os, struct Str dir_path, struct Str operation, stru
  * @param perm        Arena that owns the entry array and the names in it. Must not be `NULL`.
  * @param entries_out Receives the entry array. Written only on success. Must not be `NULL`.
  * @param count_out   Receives the number of entries. Written only on success. Must not be `NULL`.
- * @param operation   Operation leading the failure message, such as `failed to list source media`.
+ * @param operation   Operation leading the failure message, such as `failed to list static files`.
  *                    The message then names the step that failed and the directory, as in
  *                    `cannot open directory: Permission denied ('x')`.
  * @param log         Log that receives the failure. Must not be `NULL`.
