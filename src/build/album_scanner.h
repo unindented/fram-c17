@@ -7,11 +7,13 @@
 #include "shared/arena.h"
 
 struct Album;
+struct BuildCache;
 struct GalleryConfig;
 struct JobArenas;
 struct Log;
 struct MediaItem;
 struct Os;
+struct OsStat;
 struct PathList;
 struct VideoFrame;
 
@@ -51,18 +53,25 @@ int album_scanner_build_skeleton(const struct GalleryConfig* gallery_config,
  * @brief Probes media in parallel and fills only its scalar probe fields.
  *
  * This is the first of the three parallel phases. When `media_count` is 0, it runs no job and
- * returns `0`. `video_frames` holds one slot per item, prepared with `video_frame_init` for a
- * video. Each video job creates its slot's frame file. On success every video slot names a frame
- * that still exists. On failure, successful video jobs may still have created theirs. In both cases
- * the caller must eventually consume them or call `album_scanner_remove_video_frames`. A job reads
- * its source into a copy of its worker's scratch and allocates nothing that outlives it.
+ * returns `0`. Each job stats its source into its slot of `source_stats` and looks it up in
+ * `build_cache`. A row whose size and modification time match fills the probe fields without
+ * reading the source or running a tool. Any other source is probed: an image is read, and a video's
+ * duration is probed and its frame extracted.
+ *
+ * `video_frames` holds one slot per item, prepared with `video_frame_init` for a video. Each video
+ * job that probes creates its slot's frame file, and one the build cache answered for leaves its
+ * slot unused. Successful video jobs may have created theirs even when the phase fails, so the
+ * caller must eventually consume them or call `album_scanner_remove_video_frames`. A job reads its
+ * source into a copy of its worker's scratch and allocates nothing that outlives it.
  *
  * Each finished job reports progress when `is_verbose`. Failing jobs' errors go to `log` in media
  * order, as `job_run` collects them.
  *
  * @param gallery_config Gallery configuration. Must not be `NULL`.
  * @param media          Flat media pointer array. Must not be `NULL`.
- * @param media_count    Number of items and frame slots.
+ * @param media_count    Number of items, frame slots and stat slots.
+ * @param build_cache    Probe facts from an earlier build, read-only and shared by every worker.
+ *                       Empty for a build that has none or ignores it. Must not be `NULL`.
  * @param video_frames   Caller-owned frame slots, one per item in `media`. Must not be `NULL`.
  * @param worker_count   Requested worker threads, as for `pool_run`.
  * @param worker_arenas  One `JobArenas` per requested worker, as for `job_run`. Must not be `NULL`.
@@ -70,6 +79,8 @@ int album_scanner_build_skeleton(const struct GalleryConfig* gallery_config,
  * @param os             Host the sources and frames are read from and progress printed on, by every
  *                       worker at once. Must not be `NULL`.
  * @param scratch        Arena for the phase's own bookkeeping, as for `job_run`.
+ * @param source_stats   Caller-owned stat slots, one per item in `media`, each of which receives
+ *                       what `os_stat` reports for its source. Must not be `NULL`.
  * @param log            Log that receives the collected probe errors. Its arena must be none of the
  *                       others. Must not be `NULL`.
  * @return `0` when every job succeeded, or `-1` when a probe job failed or the worker pool could
@@ -78,13 +89,15 @@ int album_scanner_build_skeleton(const struct GalleryConfig* gallery_config,
 int album_scanner_probe_media(const struct GalleryConfig* gallery_config,
                               struct MediaItem* const* media,
                               ptrdiff_t media_count,
+                              const struct BuildCache* build_cache,
                               struct VideoFrame* video_frames,
                               ptrdiff_t worker_count,
                               struct JobArenas* worker_arenas,
                               bool is_verbose,
                               struct Os* os,
                               struct Arena scratch,
-                              struct Log* log) __attribute__((nonnull(1, 2, 4, 6, 8, 10)));
+                              struct OsStat* source_stats,
+                              struct Log* log) __attribute__((nonnull(1, 2, 4, 5, 7, 9, 11, 12)));
 
 /**
  * @brief Removes every frame a slot still marks as created, best effort.

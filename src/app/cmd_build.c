@@ -18,8 +18,10 @@
 #include "build/site_writer.h"
 #include "build/template.h"
 #include "core/error.h"
+#include "core/path.h"
 #include "core/path_list.h"
 #include "domain/album.h"
+#include "domain/build_cache.h"
 #include "domain/gallery_config.h"
 #include "domain/manifest.h"
 #include "domain/media_item.h"
@@ -156,10 +158,20 @@ struct BuildState {
 
   /**
    * One frame slot per media item, whose path the build allocates in `perm` for a video before the
-   * probe phase. The probe creates the frame, the derivative phase removes it, and the build
-   * removes any it left behind at its end.
+   * probe phase. The probe creates the frame, or the derivative phase does for a video the build
+   * cache answered for. The derivative phase removes it, and the build removes any it left behind
+   * at its end.
    */
   struct VideoFrame* video_frames;
+
+  /** One stat slot per media item, which the probe fills and the build cache's write reads. */
+  struct OsStat* source_stats;
+
+  /** Probe facts an earlier build left, empty when there are none or the build ignores them. */
+  struct BuildCache build_cache;
+
+  /** Path of the build cache below `output_dir`, in `perm`. */
+  struct Str build_cache_path;
 
   /**
    * One slot per album, holding that album's rendered page. A slot's `html` stays `NULL` until the
@@ -175,6 +187,9 @@ struct BuildState {
 
   /** Whether phase progress and status messages are printed to `stderr`. */
   bool is_verbose;
+
+  /** Whether the build ignores the build cache, and writes it afresh. */
+  bool is_forced;
 };
 
 /**
@@ -320,11 +335,23 @@ static int build_album_skeleton(struct BuildState* state, struct Log* log)
     __attribute__((nonnull(1, 2)));
 
 /**
+ * @brief Reads the probe facts an earlier build left, unless the build ignores them.
+ *
+ * A missing build cache, one that cannot be read, and one that does not parse or was written by
+ * another build are each an empty build cache, never an error. The verbose log says which, and the
+ * probe then reads every source.
+ *
+ * @param state Build state that receives the build cache and its path. Must not be `NULL`.
+ */
+static void load_build_cache(struct BuildState* state) __attribute__((nonnull(1)));
+
+/**
  * @brief Probes every media item's metadata, dispatching jobs across worker threads.
  *
  * A gallery with no media skips the phase, so it prints no status line and starts no pool.
  *
- * @param state Build state holding the media items and video frame slots. Must not be `NULL`.
+ * @param state Build state holding the media items, the build cache, and the frame and stat slots.
+ *              Must not be `NULL`.
  * @param log   Log that receives the collected probe errors. Must not be `NULL`.
  * @return `0` when every job succeeded or there is no media, or `-1` when any probe job failed.
  */
@@ -353,6 +380,19 @@ static int populate_output_manifest(struct BuildState* state, struct Log* log)
  * @return `0` on success, or `-1` when a component of `output_dir` cannot be created.
  */
 static int prepare_output_dir(const struct BuildState* state, struct Log* log)
+    __attribute__((nonnull(1, 2)));
+
+/**
+ * @brief Writes the build cache, with a row for every current media source.
+ *
+ * It runs as soon as `output_dir` exists, because the probe facts stay correct when a later phase
+ * fails, so the next build can still reuse them. A source that is gone has no row.
+ *
+ * @param state Build state holding the probed media items and their stats. Must not be `NULL`.
+ * @param log   Log that receives the failure. Must not be `NULL`.
+ * @return `0` on success, or `-1` when the write fails.
+ */
+static int write_build_cache(struct BuildState* state, struct Log* log)
     __attribute__((nonnull(1, 2)));
 
 /**
@@ -531,6 +571,7 @@ static void build_state_init(struct BuildState* state,
           },
       .worker_count = options->worker_count,
       .is_verbose = options->is_verbose,
+      .is_forced = options->is_forced,
   };
   gallery_config_init(&state->gallery_config);
 }
@@ -664,15 +705,16 @@ static int load_build_inputs_require_video_tools(const struct BuildState* state,
 
 static int run_build_phases(struct BuildState* state, struct Log* log) {
   // The order below follows the data: the probe records each item's derivative dimensions, which
-  // the derivative and page phases read, and extracts each video's still frame, which the
-  // derivative phase reads. Every source has to be probed before any derivative is generated or any
-  // page is rendered. Output paths do not depend on probed dimensions, because a derivative path
-  // names the recipe and not the size, so the manifest checks every output even after a probe
-  // failed.
+  // the derivative and page phases read, from the build cache or from the source, and extracts each
+  // probed video's still frame, which the derivative phase reads. Every source has to be probed
+  // before any derivative is generated or any page is rendered. Output paths do not depend on
+  // probed dimensions, because a derivative path names the recipe and not the size, so the manifest
+  // checks every output even after a probe failed.
   if (build_album_skeleton(state, log) != 0) {
     return -1;
   }
   int rc = -1;
+  load_build_cache(state);
   (void)probe_media(state, log);
   (void)populate_output_manifest(state, log);
   if (log->errors > 0) {
@@ -681,7 +723,7 @@ static int run_build_phases(struct BuildState* state, struct Log* log) {
 
   // Nothing before this point writes, so a build stopped above leaves the filesystem as it found
   // it. From here on a failure stops the phase it happens in.
-  if (prepare_output_dir(state, log) != 0) {
+  if (prepare_output_dir(state, log) != 0 || write_build_cache(state, log) != 0) {
     goto cleanup;
   }
   if (generate_derivatives(state, log) != 0 || render_album_pages(state, log) != 0) {
@@ -712,6 +754,7 @@ static int build_album_skeleton(struct BuildState* state, struct Log* log) {
   // The slots are allocated here, on the main thread, before either phase that uses them, so a job
   // only fills in its own slot and never allocates in the main thread's arenas.
   state->video_frames = arena_new(&state->perm, state->media_count, struct VideoFrame);
+  state->source_stats = arena_new(&state->perm, state->media_count, struct OsStat);
   for (ptrdiff_t i = 0; i < state->media_count; i++) {
     if (state->media[i]->kind == MEDIA_KIND_VIDEO) {
       video_frame_init(&state->video_frames[i], &state->perm);
@@ -721,14 +764,44 @@ static int build_album_skeleton(struct BuildState* state, struct Log* log) {
   return 0;
 }
 
+static void load_build_cache(struct BuildState* state) {
+  state->build_cache_path = build_cache_path(state->gallery_config.output_dir, &state->perm);
+  if (state->is_forced) {
+    build_verbose(state, "ignoring build cache, probing every source");
+    return;
+  }
+  build_verbose(state, "loading build cache");
+  // `os_stat` finds a missing build cache without a message, which is the usual case on a first
+  // build.
+  struct OsStat st;
+  if (os_stat(state->os, state->build_cache_path, &st) != 0) {
+    build_verbose(state, "no build cache, probing every source");
+    return;
+  }
+  // Why the build cache cannot be used is a note, never a build error, so it goes to a log of its
+  // own. The log grows in a copy of the scratch, which neither the read nor the parse receives, and
+  // its text is copied into `perm` before the note is formatted in the scratch.
+  struct Arena log_arena = state->scratch;
+  struct Log cache_log = {.buf = {.arena = &log_arena}};
+  struct Str text = {0};
+  if (os_read(state->os, state->build_cache_path, BUILD_CACHE_FILE_LEN_MAX, &state->perm, &text,
+              S("failed to read build cache"), &cache_log) != 0 ||
+      build_cache_parse(text, &state->perm, &state->build_cache, &cache_log) != 0) {
+    const struct Str logged = buf_str(&cache_log.buf);
+    const struct Str reason = str_clone(str_head(logged, logged.len - 1), &state->perm);
+    build_verbose(state, "build cache not used, probing every source: %.*s", STR_FMT(reason));
+  }
+}
+
 static int probe_media(struct BuildState* state, struct Log* log) {
   if (state->media_count == 0) {
     return 0;
   }
   build_verbose(state, "probing media, workers: %td", state->worker_count);
   return album_scanner_probe_media(&state->gallery_config, state->media, state->media_count,
-                                   state->video_frames, state->worker_count, state->worker_arenas,
-                                   state->is_verbose, state->os, state->scratch, log);
+                                   &state->build_cache, state->video_frames, state->worker_count,
+                                   state->worker_arenas, state->is_verbose, state->os,
+                                   state->scratch, state->source_stats, log);
 }
 
 static int populate_output_manifest(struct BuildState* state, struct Log* log) {
@@ -753,6 +826,34 @@ static int prepare_output_dir(const struct BuildState* state, struct Log* log) {
   // the root is not repeated.
   return output_writer_mkdirs(&state->writer, state->gallery_config.output_dir,
                               S("failed to prepare output directory"), log);
+}
+
+static int write_build_cache(struct BuildState* state, struct Log* log) {
+  build_verbose(state, "writing build cache");
+  struct Arena scratch = state->scratch;
+  struct Buf text = {.arena = &scratch};
+  build_cache_format_header(&text);
+  // The media array is in source order, which the walk sorted bytewise, so the rows are sorted.
+  for (ptrdiff_t i = 0; i < state->media_count; i++) {
+    const struct MediaItem* item = state->media[i];
+    const struct OsStat* source_stat = &state->source_stats[i];
+    struct Str relative = {0};
+    (void)path_is_below(item->source_path, state->gallery_config.input_dir, &relative);
+    const struct BuildCacheEntry entry = {
+        .path = relative,
+        .len = source_stat->len,
+        .mtime_s = source_stat->mtime_s,
+        .mtime_ns = source_stat->mtime_ns,
+        .width_px = item->width_px,
+        .height_px = item->height_px,
+        .orientation = item->orientation,
+        .duration_ms = item->duration_ms,
+    };
+    build_cache_format_entry(&text, &entry);
+  }
+  return output_writer_write(&state->writer, state->build_cache_path,
+                             (struct OsSource){.bytes = buf_str(&text)},
+                             S("failed to write build cache"), log);
 }
 
 static int generate_derivatives(struct BuildState* state, struct Log* log) {

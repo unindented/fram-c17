@@ -16,10 +16,12 @@
 #include "core/path.h"
 #include "core/path_list.h"
 #include "domain/album.h"
+#include "domain/build_cache.h"
 #include "domain/gallery_config.h"
 #include "domain/media_item.h"
 #include "formats/image.h"
 #include "os_memory.h"
+#include "runtime/os.h"
 #include "runtime/video.h"
 #include "shared/arena.h"
 #include "shared/buf.h"
@@ -27,6 +29,9 @@
 #include "shared/str.h"
 #include "test_jpeg_fixture.h"
 #include "test_support.h"
+
+/** A build cache with no rows, for a probe that reads every source. */
+static const struct BuildCache NO_BUILD_CACHE = {0};
 
 /** Largest file a test here reads back, in bytes. Every fixture file is a few hundred bytes. */
 enum { TEST_FILE_LEN_MAX = 1024 * 1024 };
@@ -604,6 +609,7 @@ static void test_probe_media_orients_image_dimensions(void) {
                            .derivative_count = 3};
   struct MediaItem* media[] = {&item};
   struct VideoFrame frames[1] = {{0}};
+  struct OsStat stats[1] = {0};
   struct JobArenas* worker_arenas = NULL;
   struct Log log = test_log();
   if (!TEST_CHECK(test_jpeg_encode(2, 3, &arena, &jpeg) == 0)) {
@@ -615,8 +621,8 @@ static void test_probe_media_orients_image_dimensions(void) {
   os_memory_write_bytes(os, image_path, oriented);
 
   worker_arenas = test_job_arenas(2, &arena);
-  TEST_CHECK(album_scanner_probe_media(&config, media, 1, frames, 2, worker_arenas, false, os,
-                                       arena, &log) == 0);
+  TEST_CHECK(album_scanner_probe_media(&config, media, 1, &NO_BUILD_CACHE, frames, 2, worker_arenas,
+                                       false, os, arena, stats, &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
   TEST_CHECK(item.orientation == IMAGE_ORIENTATION_RIGHT_TOP);
   TEST_CHECK(item.width_px == 3);
@@ -649,6 +655,7 @@ static void test_probe_media_sizes_cropped_derivative_exactly(void) {
                            .derivative_count = 1};
   struct MediaItem* media[] = {&item};
   struct VideoFrame frames[1] = {{0}};
+  struct OsStat stats[1] = {0};
   struct JobArenas* worker_arenas = NULL;
   struct Log log = test_log();
   if (!TEST_CHECK(test_jpeg_encode(1200, 721, &arena, &jpeg) == 0)) {
@@ -657,8 +664,8 @@ static void test_probe_media_sizes_cropped_derivative_exactly(void) {
   os_memory_write_bytes(os, image_path, jpeg);
 
   worker_arenas = test_job_arenas(1, &arena);
-  TEST_CHECK(album_scanner_probe_media(&config, media, 1, frames, 1, worker_arenas, false, os,
-                                       arena, &log) == 0);
+  TEST_CHECK(album_scanner_probe_media(&config, media, 1, &NO_BUILD_CACHE, frames, 1, worker_arenas,
+                                       false, os, arena, stats, &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
   TEST_CHECK(derivative.width_px == 520);
   TEST_CHECK(derivative.height_px == 360);
@@ -675,10 +682,11 @@ static void test_probe_media_collects_failure(void) {
   struct MediaItem item = {.source_path = path, .kind = MEDIA_KIND_IMAGE};
   struct MediaItem* media[] = {&item};
   struct VideoFrame frames[1] = {{0}};
+  struct OsStat stats[1] = {0};
   struct Log log = test_log();
   struct JobArenas* worker_arenas = test_job_arenas(1, &arena);
-  TEST_CHECK(album_scanner_probe_media(&config, media, 1, frames, 1, worker_arenas, false, os,
-                                       arena, &log) == -1);
+  TEST_CHECK(album_scanner_probe_media(&config, media, 1, &NO_BUILD_CACHE, frames, 1, worker_arenas,
+                                       false, os, arena, stats, &log) == -1);
   const struct Str errors = buf_str(&log.buf);
   TEST_CHECK(str_startswith(errors, S("failed to probe media: failed to probe JPEG: ")));
   TEST_CHECK(
@@ -686,6 +694,82 @@ static void test_probe_media_collects_failure(void) {
   TEST_MSG("log: '%.*s'", STR_FMT(errors));
   TEST_CHECK(log.errors == 1);
   TEST_CHECK(!frames[0].is_created);
+}
+
+// A source whose build cache row matches its size and modification time takes its probe fields from
+// the row, and is never read: it is not a JPEG, which a probe would reject.
+static void test_probe_media_reuses_matching_row(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  os_memory_write(os, "photos/a.jpg", "not jpeg");
+  struct GalleryConfig config;
+  test_album_scanner_init_config(&config);
+  struct MediaDerivative derivatives[3] = {0};
+  struct MediaItem item = {.source_path = S("/photos/a.jpg"),
+                           .kind = MEDIA_KIND_IMAGE,
+                           .derivatives = derivatives,
+                           .derivative_count = 3};
+  struct MediaItem* media[] = {&item};
+  struct VideoFrame frames[1] = {{0}};
+  struct OsStat stats[1] = {0};
+  struct OsStat source_stat;
+  TEST_ASSERT(os_stat(os, item.source_path, &source_stat) == 0);
+  struct BuildCacheEntry entry = {.path = S("a.jpg"),
+                                  .len = source_stat.len,
+                                  .mtime_s = source_stat.mtime_s,
+                                  .mtime_ns = source_stat.mtime_ns,
+                                  .width_px = 3,
+                                  .height_px = 2,
+                                  .orientation = IMAGE_ORIENTATION_RIGHT_TOP};
+  const struct BuildCache cache = {.entries = &entry, .count = 1};
+  struct Log log = test_log();
+  struct JobArenas* worker_arenas = test_job_arenas(1, &arena);
+
+  TEST_CHECK(album_scanner_probe_media(&config, media, 1, &cache, frames, 1, worker_arenas, false,
+                                       os, arena, stats, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(item.orientation == IMAGE_ORIENTATION_RIGHT_TOP);
+  TEST_CHECK(item.width_px == 3 && item.height_px == 2);
+  TEST_CHECK(item.derivatives[2].width_px == 3 && item.derivatives[2].height_px == 2);
+  TEST_CHECK(stats[0].len == source_stat.len && stats[0].mtime_s == source_stat.mtime_s &&
+             stats[0].mtime_ns == source_stat.mtime_ns);
+}
+
+// A row whose size or modification time no longer matches the source is not used, so the probe
+// reads the source, which here fails as it is not a JPEG.
+static void test_probe_media_probes_changed_source(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  os_memory_write(os, "photos/a.jpg", "not jpeg");
+  struct GalleryConfig config;
+  test_album_scanner_init_config(&config);
+  struct MediaItem item = {.source_path = S("/photos/a.jpg"), .kind = MEDIA_KIND_IMAGE};
+  struct MediaItem* media[] = {&item};
+  struct VideoFrame frames[1] = {{0}};
+  struct OsStat stats[1] = {0};
+  struct OsStat source_stat;
+  TEST_ASSERT(os_stat(os, item.source_path, &source_stat) == 0);
+  struct BuildCacheEntry entries[2] = {{.path = S("a.jpg"),
+                                        .len = source_stat.len + 1,
+                                        .mtime_s = source_stat.mtime_s,
+                                        .mtime_ns = source_stat.mtime_ns,
+                                        .width_px = 3,
+                                        .height_px = 2,
+                                        .orientation = IMAGE_ORIENTATION_TOP_LEFT}};
+  entries[1] = entries[0];
+  entries[1].len = source_stat.len;
+  entries[1].mtime_ns = source_stat.mtime_ns + 1;
+  struct JobArenas* worker_arenas = test_job_arenas(1, &arena);
+  for (ptrdiff_t i = 0; i < 2; i++) {
+    const struct BuildCache cache = {.entries = &entries[i], .count = 1};
+    struct Log log = test_log();
+    TEST_CHECK(album_scanner_probe_media(&config, media, 1, &cache, frames, 1, worker_arenas, false,
+                                         os, arena, stats, &log) == -1);
+    const struct Str errors = buf_str(&log.buf);
+    TEST_CHECK_(str_startswith(errors, S("failed to probe media: failed to probe JPEG: ")),
+                "row %td", i);
+    TEST_MSG("log: '%.*s'", STR_FMT(errors));
+  }
 }
 
 // A source larger than `IMAGE_INPUT_LEN_MAX`, the media read limit, fails its probe at the read,
@@ -700,12 +784,13 @@ static void test_probe_media_rejects_oversize_source(void) {
   struct MediaItem item = {.source_path = S("photos/huge.jpg"), .kind = MEDIA_KIND_IMAGE};
   struct MediaItem* media[] = {&item};
   struct VideoFrame frames[1] = {{0}};
+  struct OsStat stats[1] = {0};
   struct Log log = test_log();
   os_memory_write(os, "photos/huge.jpg", "");
   os_memory_truncate(os, "photos/huge.jpg", source_len);
   struct JobArenas* worker_arenas = test_job_arenas(1, &arena);
-  TEST_CHECK(album_scanner_probe_media(&config, media, 1, frames, 1, worker_arenas, false, os,
-                                       arena, &log) == -1);
+  TEST_CHECK(album_scanner_probe_media(&config, media, 1, &NO_BUILD_CACHE, frames, 1, worker_arenas,
+                                       false, os, arena, stats, &log) == -1);
   TEST_CHECK(test_log_is(&log,
                          "failed to probe media: exceeds max file size (%d bytes) at %td bytes "
                          "('photos/huge.jpg')\n",
@@ -735,6 +820,8 @@ TEST_LIST = {
     {"probe media orients image dimensions", test_probe_media_orients_image_dimensions},
     {"probe media sizes cropped derivative exactly",
      test_probe_media_sizes_cropped_derivative_exactly},
+    {"probe media reuses matching row", test_probe_media_reuses_matching_row},
+    {"probe media probes changed source", test_probe_media_probes_changed_source},
     {"probe media collects failure", test_probe_media_collects_failure},
     {"probe media rejects oversize source", test_probe_media_rejects_oversize_source},
     {NULL, NULL},

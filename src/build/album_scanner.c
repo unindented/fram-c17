@@ -10,6 +10,7 @@
 #include "core/path_list.h"
 #include "core/text.h"
 #include "domain/album.h"
+#include "domain/build_cache.h"
 #include "domain/gallery_config.h"
 #include "domain/media_item.h"
 #include "formats/exif.h"
@@ -57,10 +58,10 @@ struct SkeletonState {
 };
 
 /**
- * Worker context shared by all probe jobs. Every field is read-only to a job, except
- * `video_frames`, where each job writes its own slot, and `media`, where each job writes its own
- * item's probe fields: `duration_ms`, `orientation`, `width_px`, `height_px`, and each derivative's
- * dimensions.
+ * Worker context shared by all probe jobs. Every field is read-only to a job, except `video_frames`
+ * and `source_stats`, where each job writes its own slot, and `media`, where each job writes its
+ * own item's probe fields: `duration_ms`, `orientation`, `width_px`, `height_px`, and each
+ * derivative's dimensions.
  */
 struct ProbeContext {
   /** Configured derivatives each probed item is sized against. Read-only during the run. */
@@ -72,11 +73,17 @@ struct ProbeContext {
    */
   struct MediaItem* const* media;
 
+  /** Probe facts from an earlier build, which every job looks its source up in. */
+  const struct BuildCache* build_cache;
+
   /**
-   * One frame slot per item, whose file the probe creates for a video. A job writes only
+   * One frame slot per item, whose file the probe creates for a video it probes. A job writes only
    * `video_frames[index]`, and only its `is_created` and the name `mkostemp` fills in.
    */
   struct VideoFrame* video_frames;
+
+  /** One stat slot per item, which receives its source's stat. A job writes only its own. */
+  struct OsStat* source_stats;
 
   /** Host every job reads its source or frame from. */
   struct Os* os;
@@ -315,8 +322,10 @@ static int classify_media(struct Str file_name, enum MediaKind* kind_out)
  *
  * This is the `JobFn` of the probe phase, so it runs concurrently with other indexes and writes
  * only the slots belonging to `index`: the item's scalar probe fields, its derivative dimensions,
- * and, for a video, `video_frames[index]`. It allocates nothing in the skeleton's arena: the bytes
- * it reads go into a copy of its worker's scratch. A failure goes to the job's own log.
+ * `source_stats[index]`, and, for a video it probes, `video_frames[index]`. A source whose build
+ * cache row still matches its stat takes its probe fields from the row instead. It allocates
+ * nothing in the skeleton's arena: the bytes it reads go into a copy of its worker's scratch. A
+ * failure goes to the job's own log.
  *
  * @param index    Media index this job handles. Must be below the media count.
  * @param arenas   Arenas of the worker running the job. Must not be `NULL`.
@@ -352,10 +361,9 @@ static int probe_image(struct MediaItem* item,
 /**
  * @brief Probes a video's duration, extracts one frame, and records that frame's dimensions.
  *
- * The frame is taken `video_frame_seconds` into the video, falling back to the midpoint when that
- * position is at or past the end, and to zero for a video of zero duration. The orientation is
- * recorded as top-left because the extracted frame is already auto-rotated. A failure to read the
- * extracted frame still leaves the frame's file for the caller to remove.
+ * The frame is taken where `video_frame_position_ms` places it. The orientation is recorded as
+ * top-left because the extracted frame is already auto-rotated. A failure to read the extracted
+ * frame still leaves the frame's file for the caller to remove.
  *
  * @param item           Item whose `duration_ms`, `orientation`, `width_px`, and `height_px` are
  *                       written. Must not be `NULL`.
@@ -451,17 +459,21 @@ int album_scanner_build_skeleton(const struct GalleryConfig* gallery_config,
 int album_scanner_probe_media(const struct GalleryConfig* gallery_config,
                               struct MediaItem* const* media,
                               ptrdiff_t media_count,
+                              const struct BuildCache* build_cache,
                               struct VideoFrame* video_frames,
                               ptrdiff_t worker_count,
                               struct JobArenas* worker_arenas,
                               bool is_verbose,
                               struct Os* os,
                               struct Arena scratch,
+                              struct OsStat* source_stats,
                               struct Log* log) {
   struct ProbeContext context = {
       .gallery_config = gallery_config,
       .media = media,
+      .build_cache = build_cache,
       .video_frames = video_frames,
+      .source_stats = source_stats,
       .os = os,
   };
   return job_run(media_count, worker_count, worker_arenas, probe_media_job, &context,
@@ -778,8 +790,21 @@ static int probe_media_job(ptrdiff_t index,
   struct MediaItem* item = context->media[index];
   memory_oom_set_job(item->source_path, log);
   const struct Str operation = S("failed to probe media");
+  // A source that cannot be inspected is probed, so the read reports why.
+  struct OsStat* source_stat = &context->source_stats[index];
+  const struct BuildCacheEntry* entry = NULL;
+  if (os_stat(context->os, item->source_path, source_stat) == 0) {
+    struct Str relative = {0};
+    (void)path_is_below(item->source_path, context->gallery_config->input_dir, &relative);
+    entry = build_cache_find(context->build_cache, relative, source_stat);
+  }
   int rc = 0;
-  if (item->kind == MEDIA_KIND_IMAGE) {
+  if (entry != NULL) {
+    item->duration_ms = entry->duration_ms;
+    item->orientation = entry->orientation;
+    item->width_px = entry->width_px;
+    item->height_px = entry->height_px;
+  } else if (item->kind == MEDIA_KIND_IMAGE) {
     rc = probe_image(item, context->os, arenas->scratch, operation, log);
   } else {
     rc = probe_video(item, &context->video_frames[index], context->gallery_config, context->os,
@@ -847,14 +872,8 @@ static int probe_video(struct MediaItem* item,
   if (video_probe_duration(item->source_path, scratch, &item->duration_ms, operation, log) != 0) {
     return -1;
   }
-  // `gallery_config_load` caps `video_frame_seconds` at one day, so the product fits `ptrdiff_t`.
-  const ptrdiff_t requested_ms = gallery_config->video_frame_seconds * 1000;
-  ptrdiff_t position_ms = requested_ms;
-  if (item->duration_ms == 0) {
-    position_ms = 0;
-  } else if (position_ms >= item->duration_ms) {
-    position_ms = item->duration_ms / 2;
-  }
+  const ptrdiff_t position_ms =
+      video_frame_position_ms(gallery_config->video_frame_seconds, item->duration_ms);
   if (video_extract_frame(frame, item->source_path, position_ms, scratch, operation, log) != 0) {
     return -1;
   }

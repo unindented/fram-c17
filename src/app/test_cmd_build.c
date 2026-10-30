@@ -10,6 +10,7 @@
 #include "app/exit_code.h"
 #include "build/job.h"
 #include "core/path_list.h"
+#include "domain/build_cache.h"
 #include "formats/image.h"
 #include "os_memory.h"
 #include "runtime/memory.h"
@@ -96,6 +97,7 @@ static void write_gallery_fixture(struct Os* os, const char* config_extra) {
 /** Files `every_output_kind_fixture` builds to, in byte order. */
 static const char* const EVERY_OUTPUT_KIND_FILES[] = {
     "public/_fram/originals/album/one-jpg.jpg",
+    "public/_fram/v1-build-cache.tsv",
     "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.webp",
     "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.webp",
     "public/album/index.html",
@@ -259,6 +261,85 @@ static bool is_write_set_of(struct Os* dry_run_os, struct Os* real_os) {
 }
 
 /**
+ * @brief Returns the path of the build cache below `public`, as a terminated string.
+ *
+ * @param arena Arena that owns the path. Must not be `NULL`.
+ * @return The path, owned by `arena`.
+ */
+static const char* build_cache_file(struct Arena* arena) {
+  return str_cstr(build_cache_path(S("public"), arena), arena);
+}
+
+/**
+ * @brief Returns the contents of the regular file at `file_path`, copied into `arena`, or an empty
+ *        string when there is none.
+ *
+ * @param os        Host to read. Must not be `NULL`.
+ * @param file_path Terminated path of the file. Must not be `NULL`.
+ * @param arena     Arena that owns the copy. Must not be `NULL`.
+ * @return The contents.
+ */
+static struct Str file_contents(struct Os* os, const char* file_path, struct Arena* arena) {
+  struct Str data = {0};
+  if (os_memory_file(os, file_path, &data) != 0) {
+    return (struct Str){0};
+  }
+  return str_clone(data, arena);
+}
+
+/** Every file below one directory and its contents, as `snapshot_files` took them. */
+struct FileSnapshot {
+  /** Sorted paths of the files. */
+  struct PathList paths;
+
+  /** Contents of each file, parallel to `paths`. */
+  struct Str* contents;
+};
+
+/**
+ * @brief Records every file below `dir_path` and its contents.
+ *
+ * @param os       Host to read. Must not be `NULL`.
+ * @param dir_path Terminated directory to read. Must not be `NULL`.
+ * @param arena    Arena that owns the copies. Must not be `NULL`.
+ * @return The snapshot, owned by `arena`.
+ */
+static struct FileSnapshot snapshot_files(struct Os* os,
+                                          const char* dir_path,
+                                          struct Arena* arena) {
+  struct FileSnapshot snapshot = {.paths = os_memory_files(os, dir_path)};
+  snapshot.contents = arena_new(arena, snapshot.paths.count, struct Str);
+  for (ptrdiff_t i = 0; i < snapshot.paths.count; i++) {
+    snapshot.contents[i] = file_contents(os, str_cstr(snapshot.paths.items[i], arena), arena);
+  }
+  return snapshot;
+}
+
+/**
+ * @brief Reports whether the files below `dir_path` are exactly those of `snapshot`, byte for byte,
+ *        naming the first that differs when they are not.
+ *
+ * @param os       Host to read. Must not be `NULL`.
+ * @param dir_path Terminated directory to read. Must not be `NULL`.
+ * @param snapshot Files the directory must hold. Must not be `NULL`.
+ * @return `true` when every path and every byte match.
+ */
+static bool is_snapshot(struct Os* os, const char* dir_path, const struct FileSnapshot* snapshot) {
+  struct Arena arena = test_arena();
+  const struct FileSnapshot now = snapshot_files(os, dir_path, &arena);
+  bool is_equal = now.paths.count == snapshot->paths.count;
+  for (ptrdiff_t i = 0; is_equal && i < now.paths.count; i++) {
+    is_equal = str_eq(now.paths.items[i], snapshot->paths.items[i]) &&
+               str_eq(now.contents[i], snapshot->contents[i]);
+    if (!is_equal) {
+      TEST_MSG("differs: '%.*s'", STR_FMT(now.paths.items[i]));
+    }
+  }
+  TEST_CHECK_(is_equal, "'%s' holds the same files with the same bytes", dir_path);
+  return is_equal;
+}
+
+/**
  * @brief Runs a one-worker build in `TINY_ARENA_SIZE` bytes of arenas. Run through `test_is_oom`,
  *        which calls it in a child process.
  *
@@ -323,6 +404,7 @@ static void test_tolerates_trailing_slash_on_input_dir(void) {
   // No output, page, derivative or original, carries the name of `input_dir`.
   static const char* const expected[] = {
       "public/_fram/originals/album/one-jpg.jpg",
+      "public/_fram/v1-build-cache.tsv",
       "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.webp",
       "public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.webp",
       "public/album/index.html",
@@ -435,9 +517,9 @@ static void test_rebuild_succeeds_and_repeats_its_outputs(void) {
   const ptrdiff_t public_count_built = os_memory_files(os, "public").count;
   TEST_CHECK(execute_build(os, &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
-  // The album page, the root page, both derivatives and the copied original: the second build adds
-  // nothing and removes nothing.
-  TEST_CHECK(public_count_built == 5);
+  // The album page, the root page, both derivatives, the copied original and the build cache: the
+  // second build adds nothing and removes nothing.
+  TEST_CHECK(public_count_built == 6);
   TEST_CHECK(os_memory_files(os, "public").count == public_count_built);
 }
 
@@ -458,8 +540,9 @@ static void test_rebuild_removes_stale_outputs(void) {
   os_memory_write(os, "public/_fram/v1-old/album/one-jpg-s.jpg", "old");
   TEST_CHECK(execute_build(os, &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
-  // The album page, the root page, both derivatives and the copied original of the one source left.
-  TEST_CHECK(os_memory_files(os, "public").count == 5);
+  // The album page, the root page, both derivatives and the copied original of the one source left,
+  // and the build cache.
+  TEST_CHECK(os_memory_files(os, "public").count == 6);
   TEST_CHECK(os_memory_has_path(os, "public/_fram/originals/album/one-jpg.jpg"));
   TEST_CHECK(!os_memory_has_path(os, "public/_fram/originals/album/two-jpg.jpg"));
   TEST_CHECK(!os_memory_has_path(os, "public/notes.txt"));
@@ -467,7 +550,7 @@ static void test_rebuild_removes_stale_outputs(void) {
 
   TEST_CHECK(execute_build(os, &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
-  TEST_CHECK(os_memory_files(os, "public").count == 5);
+  TEST_CHECK(os_memory_files(os, "public").count == 6);
 }
 
 // An `output_dir` that a symlink inside `input_dir` reaches is left out of the media walk, so a
@@ -483,9 +566,9 @@ static void test_rebuild_skips_output_dir_linked_from_input_dir(void) {
   TEST_CHECK(execute_build(os, &log) == 0);
   TEST_CHECK(execute_build(os, &log) == 0);
   TEST_CHECK(test_log_is_empty(&log));
-  // The album page, the root page, both derivatives and the copied original, and no album for the
-  // linked output tree.
-  TEST_CHECK(os_memory_files(os, "public").count == 5);
+  // The album page, the root page, both derivatives, the copied original and the build cache, and
+  // no album for the linked output tree.
+  TEST_CHECK(os_memory_files(os, "public").count == 6);
   TEST_CHECK(!os_memory_has_path(os, "public/published"));
 }
 
@@ -521,7 +604,8 @@ static void test_dry_run_keeps_fresh_media(void) {
       "write\tpublic/album/index.html\n"
       "keep\tpublic/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-s.webp\n"
       "keep\tpublic/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.webp\n"
-      "keep\tpublic/_fram/originals/album/one-jpg.jpg\n"));
+      "keep\tpublic/_fram/originals/album/one-jpg.jpg\n"
+      "write\tpublic/_fram/v1-build-cache.tsv\n"));
 }
 
 // After a build, a changed `[derivatives.*]` table makes a dry run list the new derivatives as
@@ -549,6 +633,7 @@ static void test_dry_run_lists_stale_recipe_and_keeps_it(void) {
       "write\tpublic/_fram/v2-s-4x4c-q70-m-16x16-q75-f1000/album/one-jpg-s.webp\n"
       "write\tpublic/_fram/v2-s-4x4c-q70-m-16x16-q75-f1000/album/one-jpg-m.webp\n"
       "keep\tpublic/_fram/originals/album/one-jpg.jpg\n"
+      "write\tpublic/_fram/v1-build-cache.tsv\n"
       "remove\tpublic/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000\n"
       "remove\tpublic/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album\n"
       "remove\tpublic/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/album/one-jpg-m.webp\n"
@@ -585,6 +670,151 @@ static void test_dry_run_leaves_no_state(void) {
   TEST_CHECK(test_log_is_empty(&log));
   TEST_CHECK(is_file_list(os, "public", EVERY_OUTPUT_KIND_FILES, EVERY_OUTPUT_KIND_FILE_COUNT));
   TEST_CHECK(os_memory_is_file(os, "public/sitemap.xml", "sitemap\n"));
+}
+
+// A build after an unchanged build takes every source's probe facts from the build cache, so it
+// reads no source, here where every read of one would fail, and it leaves every output, the build
+// cache included, byte for byte as the first build wrote it.
+static void test_warm_build_reads_no_source_and_repeats_its_bytes(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/album/one.jpg");
+  write_jpeg(os, "photos/two.jpg");
+  TEST_CHECK(execute_build(os, &log) == 0);
+  const struct FileSnapshot built = snapshot_files(os, "public", &arena);
+  os_memory_fail(os, OS_MEMORY_OP_READ, "photos", EACCES);
+
+  TEST_CHECK(execute_build(os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(is_snapshot(os, "public", &built));
+}
+
+// `--force` ignores the build cache for one build, so it probes every source, here where the read
+// of the one source fails.
+static void test_force_probes_every_source(void) {
+  struct Os* os = os_memory();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/album/one.jpg");
+  TEST_CHECK(execute_build(os, &log) == 0);
+  os_memory_fail(os, OS_MEMORY_OP_READ, "photos", EACCES);
+
+  const struct BuildOptions options = {.is_forced = true};
+  TEST_CHECK(execute_build_with_options(&options, os, &log) == -1);
+  TEST_CHECK(
+      test_log_is(&log, "failed to probe media: %s ('photos/album/one.jpg')\n", strerror(EACCES)));
+}
+
+// A build rewrites the build cache with a row for each current source, sorted by path, and none for
+// a source deleted since.
+static void test_rewrites_build_cache_without_deleted_sources(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/album/c.jpg");
+  write_jpeg(os, "photos/album/b.jpg");
+  write_jpeg(os, "photos/album/a.jpg");
+  TEST_CHECK(execute_build(os, &log) == 0);
+  TEST_CHECK(os_remove(os, S("photos/album/b.jpg"), S("failed to remove fixture"), &log) == 0);
+
+  TEST_CHECK(execute_build(os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  struct Buf header = {.arena = &arena};
+  build_cache_format_header(&header);
+  const struct Str cache = file_contents(os, build_cache_file(&arena), &arena);
+  struct StrCut cut = str_cut(cache, '\n');
+  TEST_CHECK(str_eq(str_head(cache, cut.head.len + 1), buf_str(&header)));
+  cut = str_cut(cut.tail, '\n');
+  TEST_CHECK(str_startswith(cut.head, S("album/a.jpg\t")));
+  cut = str_cut(cut.tail, '\n');
+  TEST_CHECK(str_startswith(cut.head, S("album/c.jpg\t")));
+  TEST_CHECK(cut.tail.len == 0);
+  TEST_MSG("build cache: '%.*s'", STR_FMT(cache));
+}
+
+// A build cache whose first line names another build, such as an earlier release, is not used, so
+// the build probes every source, and the verbose log says why.
+static void test_ignores_build_cache_of_another_build(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/album/one.jpg");
+  TEST_CHECK(execute_build(os, &log) == 0);
+  const char* cache_file = build_cache_file(&arena);
+  const struct Str cache = file_contents(os, cache_file, &arena);
+  struct Buf other = {.arena = &arena};
+  buf_append(&other, S("fram-build-cache\tfram 0.0.0-other\n"));
+  buf_append(&other, str_cut(cache, '\n').tail);
+  os_memory_write_bytes(os, str_from_cstr(cache_file), buf_str(&other));
+  os_memory_fail(os, OS_MEMORY_OP_READ, "photos", EACCES);
+
+  const struct BuildOptions options = {.is_verbose = true};
+  TEST_CHECK(execute_build_with_options(&options, os, &log) == -1);
+  TEST_CHECK(
+      test_log_is(&log, "failed to probe media: %s ('photos/album/one.jpg')\n", strerror(EACCES)));
+  TEST_CHECK(has_printed_line(
+      os, 2,
+      "build cache not used, probing every source: build cache was written by another build"));
+}
+
+// A build cache of another format version has another name, so a build never reads it, and the
+// stale-output prune removes it as it removes any output the build no longer makes.
+static void test_prunes_build_cache_of_another_version(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/album/one.jpg");
+  os_memory_write(os, "public/_fram/v0-build-cache.tsv", "an older format\n");
+
+  TEST_CHECK(execute_build(os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(!os_memory_has_path(os, "public/_fram/v0-build-cache.tsv"));
+  TEST_CHECK(os_memory_has_path(os, build_cache_file(&arena)));
+}
+
+// A build whose probe fails stops before it writes anything, so the build cache an earlier build
+// left is unchanged.
+static void test_failed_probe_keeps_build_cache(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/album/one.jpg");
+  TEST_CHECK(execute_build(os, &log) == 0);
+  const char* cache_file = build_cache_file(&arena);
+  const struct Str cache = file_contents(os, cache_file, &arena);
+  TEST_CHECK(cache.len > 0);
+  os_memory_write(os, "photos/album/bad.jpg", "not jpeg");
+
+  TEST_CHECK(execute_build(os, &log) == -1);
+  const struct Str errors = buf_str(&log.buf);
+  TEST_CHECK(str_startswith(errors, S("failed to probe media: failed to probe JPEG: ")) &&
+             str_endswith(errors, S(" ('photos/album/bad.jpg')\n")));
+  TEST_MSG("log: '%.*s'", STR_FMT(errors));
+  TEST_CHECK(log.errors == 1);
+  TEST_CHECK(str_eq(file_contents(os, cache_file, &arena), cache));
+}
+
+// A dry run uses the build cache as a build does, so it reads no source, and it leaves the build
+// cache unchanged.
+static void test_dry_run_uses_build_cache_and_leaves_it(void) {
+  struct Os* os = os_memory();
+  struct Arena arena = test_arena();
+  struct Log log = test_log();
+  write_gallery_fixture(os, NULL);
+  write_jpeg(os, "photos/album/one.jpg");
+  TEST_CHECK(execute_build(os, &log) == 0);
+  const struct FileSnapshot built = snapshot_files(os, "public", &arena);
+  os_memory_fail(os, OS_MEMORY_OP_READ, "photos", EACCES);
+
+  TEST_CHECK(execute_dry_run(os, &log) == 0);
+  TEST_CHECK(test_log_is_empty(&log));
+  TEST_CHECK(is_snapshot(os, "public", &built));
 }
 
 // A caller-supplied `worker_count` reaches every pool instead of being replaced by the detected
@@ -716,7 +946,10 @@ static void test_skips_empty_phases_in_verbose_output(void) {
                                   "discovering media\n"
                                   "discovering static files\n"
                                   "planning albums\n"
+                                  "loading build cache\n"
+                                  "no build cache, probing every source\n"
                                   "building output manifest\n"
+                                  "writing build cache\n"
                                   "rendering albums, workers: 3\n"
                                   "\rrendering albums 1/1\n"
                                   "writing album pages\n"
@@ -1239,6 +1472,15 @@ TEST_LIST = {
     {"dry run lists stale recipe and keeps it", test_dry_run_lists_stale_recipe_and_keeps_it},
     {"dry run attempts no change", test_dry_run_attempts_no_change},
     {"dry run leaves no state", test_dry_run_leaves_no_state},
+    {"warm build reads no source and repeats its bytes",
+     test_warm_build_reads_no_source_and_repeats_its_bytes},
+    {"force probes every source", test_force_probes_every_source},
+    {"rewrites build cache without deleted sources",
+     test_rewrites_build_cache_without_deleted_sources},
+    {"ignores build cache of another build", test_ignores_build_cache_of_another_build},
+    {"prunes build cache of another version", test_prunes_build_cache_of_another_version},
+    {"failed probe keeps build cache", test_failed_probe_keeps_build_cache},
+    {"dry run uses build cache and leaves it", test_dry_run_uses_build_cache_and_leaves_it},
     {"honors requested worker count", test_honors_requested_worker_count},
     {"caps the worker count at four per CPU", test_caps_the_worker_count_at_four_per_cpu},
     {"cuts workers before arenas under limit", test_cuts_workers_before_arenas_under_limit},

@@ -28,6 +28,9 @@ struct BuildOptions {
    * build would write, keep, and remove.
    */
   bool is_dry_run;
+
+  /** Whether to ignore the build cache for this build, then write it afresh. */
+  bool is_forced;
 };
 
 /**

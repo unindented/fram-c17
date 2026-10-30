@@ -5,17 +5,20 @@
 #include <acutest.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 
 #include "app/cmd_build.h"
 #include "build/job.h"
 #include "core/path.h"
 #include "runtime/fs.h"
+#include "runtime/os.h"
 #include "runtime/pool.h"
 #include "shared/arena.h"
 #include "shared/buf.h"
 #include "shared/log.h"
 #include "shared/str.h"
+#include "test_jpeg_fixture.h"
 #include "test_support.h"
 
 // The builds of galleries that hold videos. They run `ffprobe` and `ffmpeg` fakes on `PATH`, and a
@@ -103,6 +106,91 @@ static int execute_build_in(const struct BuildOptions* options,
   return working_dir_leave(saved_dir_fd) == 0 ? rc : TEST_PLUMBING_FAILED;
 }
 
+/**
+ * @brief Builds a fixture with one worker and returns which fake tools ran, one name per line, then
+ *        empties the record for the next build.
+ *
+ * @param root_dir Fixture directory holding the gallery and the fake tools. Must not be `NULL`.
+ * @param log_path Terminated file the fake tools append their names to. Must not be `NULL`.
+ * @param log      Log that receives the build's errors. Must not be `NULL`.
+ * @param arena    Arena that owns the returned record. Must not be `NULL`.
+ * @return The names of the tools the build ran, in order, or `NULL` when the build failed.
+ */
+static const char* build_and_take_tool_runs(const char* root_dir,
+                                            const char* log_path,
+                                            struct Log* log,
+                                            struct Arena* arena) {
+  const struct BuildOptions options = {.worker_count = 1};
+  if (!TEST_CHECK(execute_build_in(&options, root_dir, log) == 0)) {
+    return NULL;
+  }
+  struct Str runs = {0};
+  struct Log read_log = test_log();
+  if (os_read(os_posix(), str_from_cstr(log_path), 4096, arena, &runs, S("failed to read runs"),
+              &read_log) != 0) {
+    runs = S("");
+  }
+  struct Log write_log = test_log();
+  TEST_CHECK(os_write(os_posix(), str_from_cstr(log_path), (struct OsSource){.bytes = S("")},
+                      S("failed to empty runs"), &write_log) == 0);
+  return str_cstr(runs, arena);
+}
+
+// A video the build cache answers for runs neither `ffprobe` nor `ffmpeg` while its derivatives are
+// fresh. Once one is stale, the build extracts the frame for it, so only `ffmpeg` runs, and the
+// derivative is written again.
+static void test_cached_video_extracts_its_frame_only_when_needed(void) {
+  char root_dir[] = "/tmp/fram-build-cached-video.XXXXXX";
+  if (init_fixture_dir(root_dir) != 0) {
+    return;
+  }
+  static const char script[] =
+      "#!/bin/sh\n"
+      "[ \"$1\" = -version ] && exit 0\n"
+      "printf '%s\\n' \"${0##*/}\" >> \"$FRAM_TEST_LOG\"\n"
+      "case \"$0\" in\n"
+      "  *ffprobe) printf '1.000\\n' ;;\n"
+      "  *) for arg do last=$arg; done; /bin/cp \"$FRAM_TEST_FRAME\" \"$last\" ;;\n"
+      "esac\n";
+  struct Arena arena = test_arena();
+  const char* path_saved = save_env("PATH", &arena);
+  const char* frame_saved = save_env("FRAM_TEST_FRAME", &arena);
+  const char* log_saved = save_env("FRAM_TEST_LOG", &arena);
+  const struct Str root = str_from_cstr(root_dir);
+  const struct Str bin_dir = path_join(root, S("bin"), &arena);
+  const struct Str frame_path = path_join(root, S("frame.jpg"), &arena);
+  const char* log_path = str_cstr(path_join(root, S("runs.txt"), &arena), &arena);
+  const struct Str derivative_path =
+      path_join(root, S("public/_fram/v2-s-8x8c-q70-m-16x16-q75-f1000/clip-mp4-s.webp"), &arena);
+  struct Str frame = {0};
+  struct Log log = test_log();
+  if (TEST_CHECK(write_gallery_fixture(root_dir) == 0) &&
+      write_fake_video_tools(root_dir, str_from_cstr(script), &arena) == 0 &&
+      TEST_CHECK(write_fixture_file(root_dir, "photos/clip.mp4", "") == 0) &&
+      TEST_CHECK(test_jpeg_encode(24, 12, &arena, &frame) == 0) &&
+      TEST_CHECK(os_write(os_posix(), frame_path, (struct OsSource){.bytes = frame},
+                          S("failed to write fixture"), &log) == 0) &&
+      TEST_CHECK(setenv("PATH", str_cstr(bin_dir, &arena), 1) == 0) &&
+      TEST_CHECK(setenv("FRAM_TEST_FRAME", str_cstr(frame_path, &arena), 1) == 0) &&
+      TEST_CHECK(setenv("FRAM_TEST_LOG", log_path, 1) == 0)) {
+    const char* runs = build_and_take_tool_runs(root_dir, log_path, &log, &arena);
+    TEST_CHECK(runs != NULL && strcmp(runs, "ffprobe\nffmpeg\n") == 0);
+    runs = build_and_take_tool_runs(root_dir, log_path, &log, &arena);
+    TEST_CHECK(runs != NULL && strcmp(runs, "") == 0);
+    TEST_CHECK(os_remove(os_posix(), derivative_path, S("failed to remove fixture"), &log) == 0);
+    runs = build_and_take_tool_runs(root_dir, log_path, &log, &arena);
+    TEST_CHECK(runs != NULL && strcmp(runs, "ffmpeg\n") == 0);
+    TEST_MSG("runs: '%s'", runs != NULL ? runs : "");
+    struct OsStat st;
+    TEST_CHECK(os_stat(os_posix(), derivative_path, &st) == 0 && st.len > 0);
+    TEST_CHECK(test_log_is_empty(&log));
+  }
+  restore_env("PATH", path_saved);
+  restore_env("FRAM_TEST_FRAME", frame_saved);
+  restore_env("FRAM_TEST_LOG", log_saved);
+  remove_fixture_tree(root_dir);
+}
+
 // Many videos whose probe child fails with a full standard-error tail are reported normally: the
 // first `JOB_ERROR_REPORT_COUNT_MAX` failures whole, each with its tail on one line, then a count
 // of the rest. A worker keeps the logs of only those failures, and
@@ -171,6 +259,8 @@ cleanup:
 }
 
 TEST_LIST = {
+    {"cached video extracts its frame only when needed",
+     test_cached_video_extracts_its_frame_only_when_needed},
     {"reports many failed children", test_reports_many_failed_children},
     {NULL, NULL},
 };

@@ -19,7 +19,7 @@ Download a prebuilt binary from the [Releases](https://github.com/unindented/fra
 
 `fram` is command-based:
 
-- `fram build`: Generate the gallery in the configured output directory. Use `-w, --workers N` to set the most worker threads the build runs. The value must be a positive integer. By default, the tool uses the detected CPU count. A build never runs more workers than it has media files or albums, whichever is more, or more than four for each online CPU. Use `-n, --dry-run` to report what the build would change without changing it, as [Dry run](#dry-run) describes. Use `-v, --verbose` to print build progress to `stderr`.
+- `fram build`: Generate the gallery in the configured output directory. Use `-w, --workers N` to set the most worker threads the build runs. The value must be a positive integer. By default, the tool uses the detected CPU count. A build never runs more workers than it has media files or albums, whichever is more, or more than four for each online CPU. Use `-n, --dry-run` to report what the build would change without changing it, as [Dry run](#dry-run) describes. Use `--force` to ignore the [build cache](#build-cache) for one build. Use `-v, --verbose` to print build progress to `stderr`.
 - `fram config`: Print the resolved project configuration as TOML.
 
 Run these commands for help:
@@ -45,7 +45,7 @@ remove	public/_fram/v1-s-120x120c-q70-m-1200x800-q85-f1000/album/one-jpg-m.webp
 - `keep`: a derivative or copied original the build would leave as it is, because it is current.
 - `remove`: a path that the build would remove because the current inputs no longer produce it, directories included.
 
-The `write` and `keep` lines come first, in the order the build plans them: each album's outputs in album order, then aggregates, then static files. The `remove` lines follow, sorted. `cut -f2-` gives the bare paths for `sort`, `diff`, or `comm`. A dry run reports a failure exactly as a build does, on `stderr` and with the same exit code, and then prints no listing. With `-v`, progress still goes to `stderr`, so the listing stays clean to pipe.
+The `write` and `keep` lines come first, in the order the build plans them: each album's outputs in album order, then aggregates, static files, and the build cache. The `remove` lines follow, sorted. `cut -f2-` gives the bare paths for `sort`, `diff`, or `comm`. A dry run reports a failure exactly as a build does, on `stderr` and with the same exit code, and then prints no listing. With `-v`, progress still goes to `stderr`, so the listing stays clean to pipe.
 
 A dry run that passes does not promise that the build will. It writes nothing, so it cannot find these failures:
 
@@ -54,6 +54,14 @@ A dry run that passes does not promise that the build will. It writes nothing, s
 - An old file where a new output needs a directory, or an old directory where a new output needs a file, such as `public/blog` becoming `public/blog/index.html`.
 - An `output_dir` that exists but is not a usable directory.
 - A source image that is broken past its header. A dry run does not decode images.
+
+### Build cache
+
+A build records what it read from each source, its dimensions, EXIF orientation and video duration, in `_fram/v1-build-cache.tsv` below `output_dir`. The next build reuses a row while the source's size and modification time are unchanged, so it reads no unchanged photo and runs no `ffprobe` for an unchanged video, and a template edit no longer reads the whole source tree. A new release, or a file that is missing or damaged, probes every source again.
+
+A tool that changes a file but keeps its size and modification time, such as `exiftool -P`, leaves a row that no longer describes the file. Run `fram build --force` once to probe every source and write the build cache afresh.
+
+The file is published with the rest of `output_dir`. It holds each source's path relative to `input_dir`, with the raw file name that page titles and URL slugs change, and its size and modification time, which no published file carries. Exclude `_fram/v1-build-cache.tsv` when you deploy if that matters.
 
 ### Gallery layout
 

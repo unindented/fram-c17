@@ -20,10 +20,11 @@ struct VideoFrame;
  *
  * This is the second of the three parallel phases. When `media_count` is 0, it runs no job and
  * returns `0`. One job owns each media item. `video_frames[index]` supplies the auto-rotated JPEG
- * the probe extracted for a video. Every video frame is removed after its job, including on
- * failure, best effort: a frame whose unlink fails stays marked for the caller's final cleanup. A
- * job reads its source into a copy of its worker's scratch and allocates its decoded pixels with
- * `malloc`, under a budget shared by every worker.
+ * the probe extracted for a video. A video the build cache answered for has no frame yet, and its
+ * job extracts one only when a derivative is stale. Every video frame is removed after its job,
+ * including on failure, best effort: a frame whose unlink fails stays marked for the caller's final
+ * cleanup. A job reads its source into a copy of its worker's scratch and allocates its decoded
+ * pixels with `malloc`, under a budget shared by every worker.
  *
  * Every output goes through `writer`: a fresh derivative or original copy is marked kept, and a
  * stale one written. A dry run marks each stale output written without making it, so it decodes and
@@ -42,8 +43,9 @@ struct VideoFrame;
  *                       not be `NULL`.
  * @param media          Probed media items, one job per item. Must not be `NULL`.
  * @param media_count    Number of items in `media`.
- * @param video_frames   Frame slots, one per item in `media`, filled by the probe for a video. Must
- *                       not be `NULL`.
+ * @param video_frames   Frame slots, one per item in `media`, filled by the probe for a video it
+ *                       probed, and by the job for one the build cache answered for. Must not be
+ *                       `NULL`.
  * @param worker_count   Requested worker threads, as for `pool_run`.
  * @param worker_arenas  One `JobArenas` per requested worker, as for `job_run`. Must not be `NULL`.
  * @param is_verbose     Whether progress is printed to `stderr`.

@@ -88,6 +88,15 @@ static void test_dry_run_with_other_build_flags(void) {
   TEST_CHECK(options.is_verbose);
 }
 
+// `--force` asks the build to ignore its build cache. It has no short spelling.
+static void test_force_long_flag(void) {
+  char* argv[] = {"fram", "build", "--force", NULL};
+  struct CliOptions options = parse(argv);
+  TEST_CHECK(options.action == CLI_ACTION_RUN);
+  TEST_CHECK(options.is_forced);
+  TEST_CHECK(!options.is_dry_run);
+}
+
 // `--workers 4` sets the worker count from a separate token.
 static void test_workers_long_flag_separate_value(void) {
   char* argv[] = {"fram", "build", "--workers", "4", NULL};
@@ -316,7 +325,7 @@ static void test_missing_worker_count_rejected(void) {
 
 // A flag that takes no value rejects an attached `=value` and names the complete token. copt
 // matches only the text before `=`. Without this check, it discards the value and enables
-// `--verbose=0`. The test covers all four flags that take no value. `--version` and `--help` clear
+// `--verbose=0`. The test covers all five flags that take no value. `--version` and `--help` clear
 // `error_message`, so they could otherwise hide this rejection. The
 // `test_workers_long_flag_equals_value` test confirms that `--workers=N` still works.
 static void test_attached_value_rejected_on_valueless_flags(void) {
@@ -331,6 +340,12 @@ static void test_attached_value_rejected_on_valueless_flags(void) {
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
   TEST_CHECK(!options.is_dry_run);
   TEST_CHECK(str_eq(options.error_message, S("option does not take a value: '--dry-run=0'")));
+
+  char* force_argv[] = {"fram", "build", "--force=1", NULL};
+  options = parse(force_argv);
+  TEST_CHECK(options.action == CLI_ACTION_ERROR);
+  TEST_CHECK(!options.is_forced);
+  TEST_CHECK(str_eq(options.error_message, S("option does not take a value: '--force=1'")));
 
   char* help_argv[] = {"fram", "--help=nope", NULL};
   options = parse(help_argv);
@@ -439,6 +454,14 @@ static void test_config_command_rejects_dry_run(void) {
   TEST_CHECK(options.action == CLI_ACTION_ERROR);
   TEST_CHECK(
       str_eq(options.error_message, S("command 'config' does not accept option '--dry-run'")));
+}
+
+// The config command rejects a build-only flag like `--force`, naming the command and the flag.
+static void test_config_command_rejects_force(void) {
+  char* argv[] = {"fram", "config", "--force", NULL};
+  struct CliOptions options = parse(argv);
+  TEST_CHECK(options.action == CLI_ACTION_ERROR);
+  TEST_CHECK(str_eq(options.error_message, S("command 'config' does not accept option '--force'")));
 }
 
 // With two unsupported flags, the reported one is fixed by the `cli_flags` table order rather than
@@ -553,6 +576,8 @@ static void test_print_usage_names_program_and_command(void) {
     TEST_CHECK(strstr(text, cases[i].needle) != NULL);
     if (cases[i].command == CLI_COMMAND_BUILD) {
       TEST_CHECK(strstr(text, "-n, --dry-run") != NULL);
+      TEST_CHECK(strstr(text, "    --force          Ignore the build cache for this build\n") !=
+                 NULL);
     }
     // The command-less help substitutes the name a second time, in the trailer.
     if (cases[i].command == CLI_COMMAND_NONE) {
@@ -584,6 +609,7 @@ TEST_LIST = {
     {"dry run long flag", test_dry_run_long_flag},
     {"dry run short flag", test_dry_run_short_flag},
     {"dry run with other build flags", test_dry_run_with_other_build_flags},
+    {"force long flag", test_force_long_flag},
     {"workers long flag separate value", test_workers_long_flag_separate_value},
     {"workers short flag separate value", test_workers_short_flag_separate_value},
     {"workers short flag attached value", test_workers_short_flag_attached_value},
@@ -619,6 +645,7 @@ TEST_LIST = {
     {"config command rejects verbose", test_config_command_rejects_verbose},
     {"config command rejects workers", test_config_command_rejects_workers},
     {"config command rejects dry run", test_config_command_rejects_dry_run},
+    {"config command rejects force", test_config_command_rejects_force},
     {"config command rejects first flag in table order",
      test_config_command_rejects_first_flag_in_table_order},
     {"unknown command", test_unknown_command},

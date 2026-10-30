@@ -162,6 +162,15 @@ int video_probe_duration(struct Str file_path,
   return parse_duration_ms(output, duration_ms_out, operation, file_path, log);
 }
 
+ptrdiff_t video_frame_position_ms(ptrdiff_t frame_seconds, ptrdiff_t duration_ms) {
+  // `frame_seconds` is at most one day, so the product fits `ptrdiff_t`.
+  const ptrdiff_t position_ms = frame_seconds * 1000;
+  if (duration_ms == 0) {
+    return 0;
+  }
+  return position_ms < duration_ms ? position_ms : duration_ms / 2;
+}
+
 int video_extract_frame(struct VideoFrame* frame,
                         struct Str file_path,
                         ptrdiff_t position_ms,

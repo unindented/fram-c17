@@ -184,8 +184,7 @@ bool os_memory_is_file(struct Os* os, const char* file_path, const char* content
 bool os_memory_has_path(struct Os* os, const char* path) __attribute__((nonnull(1, 2)));
 
 /**
- * @brief Reads the contents of the regular file at `file_path`, such as an encoded image a test
- *        decodes.
+ * @brief Reads the contents of the regular file at `file_path`, such as a file a build wrote.
  *
  * @param os        Host to inspect. Must not be `NULL`.
  * @param file_path Terminated path of the file, followed through symlinks. Must not be `NULL`.

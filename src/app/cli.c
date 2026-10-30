@@ -25,6 +25,7 @@ enum CliFlag {
   CLI_FLAG_VERBOSE = 1u << 0,
   CLI_FLAG_WORKERS = 1u << 1,
   CLI_FLAG_DRY_RUN = 1u << 2,
+  CLI_FLAG_FORCE = 1u << 3,
 };
 
 /** One command-scoped flag paired with the long-option name used to name it in diagnostics. */
@@ -47,12 +48,13 @@ static const struct CliFlagSpec cli_flags[] = {
     {CLI_FLAG_VERBOSE, "--verbose"},
     {CLI_FLAG_WORKERS, "--workers"},
     {CLI_FLAG_DRY_RUN, "--dry-run"},
+    {CLI_FLAG_FORCE, "--force"},
 };
 
 /** Subcommand table indexed by `enum CliCommand`. `CLI_COMMAND_NONE` stays zero-initialized. */
 static const struct CliCommandSpec cli_commands[] = {
     [CLI_COMMAND_BUILD] = {STR_INIT("build"),
-                           CLI_FLAG_VERBOSE | CLI_FLAG_WORKERS | CLI_FLAG_DRY_RUN},
+                           CLI_FLAG_VERBOSE | CLI_FLAG_WORKERS | CLI_FLAG_DRY_RUN | CLI_FLAG_FORCE},
     [CLI_COMMAND_CONFIG] = {STR_INIT("config"), 0},
 };
 
@@ -213,6 +215,11 @@ void cli_parse(struct CliOptions* options, int argc, char** argv, struct Arena* 
         options->is_dry_run = true;
         flags_seen |= CLI_FLAG_DRY_RUN;
       }
+    } else if (copt_opt(&opt, "force")) {
+      if (cli_parse_require_no_attached_value(options, &opt, argv, arena) == 0) {
+        options->is_forced = true;
+        flags_seen |= CLI_FLAG_FORCE;
+      }
     } else if (copt_opt(&opt, "w|workers")) {
       cli_parse_workers_option(options, &opt, &flags_seen, arena);
     } else {
@@ -266,6 +273,7 @@ int cli_print_usage(struct Str program_name,
           "OPTIONS:\n"
           "    -w, --workers N  Use at most N worker threads (default: detected CPU count)\n"
           "    -n, --dry-run    Report what would be written, kept, or removed, changing nothing\n"
+          "    --force          Ignore the build cache for this build\n"
           "    -v, --verbose    Print build progress to stderr\n"
           "    -h, --help       Print this help and exit\n",
           STR_FMT(program_name));

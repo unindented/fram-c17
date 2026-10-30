@@ -52,8 +52,10 @@ int manifest_builder_check_output_dir(const struct GalleryConfig* gallery_config
  *        output that would land inside a build input tree or overwrite a build input file.
  *
  * Registers album page, derivative, original, aggregate, and static file output paths before
- * writing any file, so it catches a collision between two producers up front. It rejects four kinds
- * of collision:
+ * writing any file, and the build cache's path last, so it catches a collision between two
+ * producers up front. A static file at the build cache's path is a duplicate rather than a silent
+ * overwrite, and being recorded is what keeps the build cache through the stale-output prune. It
+ * rejects four kinds of collision:
  * - an output path at or below `input_dir`, `templates_dir`, or `static_dir`
  * - an output path that names a build input
  * - two producers that claim one output path, compared after folding ASCII case

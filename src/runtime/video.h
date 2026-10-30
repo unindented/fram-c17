@@ -10,8 +10,10 @@
 struct Log;
 
 /**
- * One video's temporary frame file. The probe phase creates it and the derivative phase removes it.
- * The path is allocated on the main thread before either phase, so a job only fills it in.
+ * One video's temporary frame file. The probe phase creates it, unless the build cache answered for
+ * the video, in which case the derivative phase creates it once a derivative is stale. The
+ * derivative phase removes it. The path is allocated on the main thread before either phase, so a
+ * job only fills it in.
  */
 struct VideoFrame {
   /**
@@ -66,6 +68,18 @@ int video_probe_duration(struct Str file_path,
                          ptrdiff_t* duration_ms_out,
                          struct Str operation,
                          struct Log* log) __attribute__((nonnull(3, 5)));
+
+/**
+ * @brief Returns the position a video's frame is taken at.
+ *
+ * That is `frame_seconds` into the video, the midpoint when that position is at or past the end,
+ * and zero for a video of zero duration.
+ *
+ * @param frame_seconds Configured position in seconds, at most one day. Must not be negative.
+ * @param duration_ms   Duration of the video in milliseconds. Must not be negative.
+ * @return The position in milliseconds, below `duration_ms` unless that is zero.
+ */
+ptrdiff_t video_frame_position_ms(ptrdiff_t frame_seconds, ptrdiff_t duration_ms);
 
 /**
  * @brief Extracts one auto-rotated JPEG frame through `ffmpeg` into the frame slot's file.

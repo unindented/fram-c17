@@ -57,6 +57,9 @@ struct CliOptions {
   /** Whether the build only reports what it would write, keep, or remove, changing nothing. */
   bool is_dry_run;
 
+  /** Whether the build ignores its build cache, and writes it afresh. */
+  bool is_forced;
+
   /**
    * Failure diagnostic, non-empty exactly when `action` is `CLI_ACTION_ERROR`. It is a formatted
    * copy in the arena `cli_parse` was given, so it holds no pointer into `argv` or into copt's

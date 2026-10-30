@@ -69,7 +69,8 @@ static struct DecodeBudget decode_budget = {
 
 /**
  * Worker context shared by all derivative jobs. Every field is read-only to a job, apart from the
- * marks each job leaves on its own item's paths in the writer's manifest.
+ * marks each job leaves on its own item's paths in the writer's manifest and its own frame slot,
+ * which it creates when the probe did not and then removes.
  */
 struct DerivativeContext {
   /** Configured derivative sizes, crops, and qualities. Read-only during the run. */
@@ -82,8 +83,9 @@ struct DerivativeContext {
   struct MediaItem* const* media;
 
   /**
-   * Extracted video frames, one slot per job index. A job reads its own frame and removes it, which
-   * clears the slot's `is_created`, so the job writes only its own slot.
+   * Video frames, one slot per job index. A job reads its own frame, extracting it first when the
+   * probe did not, and removes it, which clears the slot's `is_created`, so the job writes only its
+   * own slot.
    */
   struct VideoFrame* video_frames;
 
@@ -171,10 +173,12 @@ static int render_derivatives_outputs_mark(const struct OutputWriter* writer,
 /**
  * @brief Reads, decodes, and orients one item's source, then writes each of its stale derivatives.
  *
- * The source is decoded at the smallest scale its stale derivatives allow. The job runs under a
- * `decode_budget` reservation for the most it holds at once: while it decodes and orients the
- * source, as `image_decode_len` counts it, or while it writes its largest stale derivative beside
- * the oriented source. The reservation is kept until the decoded image is released.
+ * A video whose frame the probe did not extract, because the build cache answered for it, has its
+ * frame extracted first. The source is decoded at the smallest scale its stale derivatives allow.
+ * The job runs under a `decode_budget` reservation for the most it holds at once: while it decodes
+ * and orients the source, as `image_decode_len` counts it, or while it writes its largest stale
+ * derivative beside the oriented source. The reservation is kept until the decoded image is
+ * released.
  *
  * @param context  Shared derivative-phase state. Must not be `NULL`.
  * @param index    Media index whose derivatives are written.
@@ -499,9 +503,15 @@ static int render_derivatives_images(const struct DerivativeContext* context,
                                      struct Arena scratch,
                                      struct Log* log) {
   const struct MediaItem* item = context->media[index];
-  const struct VideoFrame* frame = &context->video_frames[index];
-  if (item->kind == MEDIA_KIND_VIDEO && !frame->is_created) {
-    return log_error(log, "video frame is unavailable ('%.*s')", STR_FMT(item->source_path));
+  struct VideoFrame* frame = &context->video_frames[index];
+  // A video the build cache answered for was not probed, so its frame is extracted here, once a
+  // stale derivative needs it. The job removes it like a probed one.
+  if (item->kind == MEDIA_KIND_VIDEO && !frame->is_created &&
+      video_extract_frame(
+          frame, item->source_path,
+          video_frame_position_ms(context->gallery_config->video_frame_seconds, item->duration_ms),
+          scratch, S("failed to extract video frame"), log) != 0) {
+    return -1;
   }
   const struct Str derivative_source_path =
       item->kind == MEDIA_KIND_VIDEO ? str_from_cstr(frame->path) : item->source_path;
