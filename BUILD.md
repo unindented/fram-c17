@@ -15,7 +15,7 @@ The top-level [CMakeLists.txt](CMakeLists.txt) sets the project policy, finds th
 | [cmake/fram_build_profiles.cmake](cmake/fram_build_profiles.cmake) | Sets warnings, optimization, fortification and sanitizers |
 | [cmake/fram_quality.cmake](cmake/fram_quality.cmake) | Configures formatting and static analysis |
 | [cmake/fram_testing.cmake](cmake/fram_testing.cmake) | Defines `fram_add_unit_test`, which registers a unit test and selects the host that the test links |
-| [cmake/fram_run_golden.cmake](cmake/fram_run_golden.cmake) | Runs one golden test |
+| [cmake/fram_run_golden.cmake](cmake/fram_run_golden.cmake) | Runs the golden test |
 | [cmake/fram_packaging.cmake](cmake/fram_packaging.cmake) | Configures installation and CPack archives |
 | [cmake/fram_restyle_graphviz_svg.cmake](cmake/fram_restyle_graphviz_svg.cmake) | Adds light and dark styles to the target graph |
 | [cmake/toolchains/](cmake/toolchains/) | Configures Zig to cross-compile for the Linux `musl` release targets |
@@ -141,7 +141,7 @@ The library also defines the `os_oom` of the unit tests. This `os_oom` exits wit
 
 [tests/test_support.c](tests/test_support.c) defines `TEST_NO_MAIN`, so the `main` function and the run state of acutest stay in the translation unit of each test executable. The library uses acutest declarations such as `acutest_check_`, `acutest_message_` and `acutest_abort_`, and the linker resolves these declarations against that translation unit. When a check in the library fails, acutest reports the failure against `test_support.c`, and the test that called the library fails.
 
-### Golden tests
+### Golden test
 
 The golden test `fram.golden` builds the fixture gallery in `tests/fixtures/gallery`, which mixes JPEG and MP4 sources in the default `media/` directory. `tests/CMakeLists.txt` defines this test only when the configure step finds both `ffmpeg` and `ffprobe`. `cmake/fram_run_golden.cmake` does these steps:
 

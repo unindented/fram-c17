@@ -173,11 +173,11 @@ When you publish `output_dir`, you also publish the build cache. It contains the
 
 The build rejects an input file that is too large before it reads the file. The error message gives the limit and the file size.
 
-| File | Limit |
-| --- | --- |
+| File                              | Limit                                 |
+| --------------------------------- | ------------------------------------- |
 | JPEG source or video poster frame | 2,147,483,647 bytes, just under 2 GiB |
-| Config file | 1 MiB |
-| Template or partial | 4 MiB |
+| Config file                       | 1 MiB                                 |
+| Template or partial               | 4 MiB                                 |
 
 A source image can have at most 100 million pixels.
 
@@ -202,11 +202,11 @@ In the titles of albums and media items, `fram` shows each underscore as a space
 
 The default derivatives are these:
 
-| Name | Size | Crop | Quality |
-| --- | --- | --- | --- |
-| `s` | 120 x 120 | Yes | 70 |
-| `m` | 520 x 360 | Yes | 80 |
-| `l` | Fits within 792 x 594 | No | 85 |
+| Name | Size                  | Crop | Quality |
+| ---- | --------------------- | ---- | ------- |
+| `s`  | 120 x 120             | Yes  | 70      |
+| `m`  | 520 x 360             | Yes  | 80      |
+| `l`  | Fits within 792 x 594 | No   | 85      |
 
 This `derivatives` table sets the same defaults:
 
