@@ -33,6 +33,22 @@ static void test_safe_identifier_accepts_narrow_alphabet(void) {
   TEST_CHECK(!text_is_safe_identifier(S("a\0b")));
 }
 
+// A suffix matches at the end of the text in any ASCII letter case. A text shorter than the suffix,
+// a different ending, and a non-ASCII byte that differs only in its case bit do not match, because
+// only `A-Z` folds.
+static void test_has_suffix_folded_folds_only_ascii_letters(void) {
+  TEST_CHECK(text_has_suffix_folded(S("dir/a.txt"), S(".txt")));
+  TEST_CHECK(text_has_suffix_folded(S("dir/A.TXT"), S(".txt")));
+  TEST_CHECK(text_has_suffix_folded(S("a.Txt"), S(".TXT")));
+  TEST_CHECK(text_has_suffix_folded(S(".txt"), S(".txt")));
+  TEST_CHECK(text_has_suffix_folded(S("a.txt"), S("")));
+  TEST_CHECK(!text_has_suffix_folded(S("txt"), S(".txt")));
+  TEST_CHECK(!text_has_suffix_folded(S("a.text"), S(".txt")));
+  TEST_CHECK(!text_has_suffix_folded(S("a.txt.bak"), S(".txt")));
+  TEST_CHECK(!text_has_suffix_folded(S("caf\xC3\x89"), S("caf\xC3\xA9")));
+  TEST_CHECK(!text_has_suffix_folded(S("a.m@"), S(".m`")));
+}
+
 // A run of ASCII punctuation, underscores, and spaces collapses to one dash and uppercase folds
 // down, so `Hello, C17_World!` yields a single dash between words rather than one per stripped
 // byte. Text with nothing usable in it takes `SLUG_FALLBACK` instead of yielding an empty slug.
@@ -83,6 +99,7 @@ static void test_slugify_treats_nul_as_separator(void) {
 TEST_LIST = {
     {"nul free checks bounded bytes", test_nul_free_checks_bounded_bytes},
     {"safe identifier accepts narrow alphabet", test_safe_identifier_accepts_narrow_alphabet},
+    {"has suffix folded folds only ascii letters", test_has_suffix_folded_folds_only_ascii_letters},
     {"slugify normalizes and defaults", test_slugify_normalizes_and_defaults},
     {"slugify folds non-ascii distinctly", test_slugify_folds_non_ascii_distinctly},
     {"slugify honors length", test_slugify_honors_length},
