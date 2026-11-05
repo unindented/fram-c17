@@ -44,7 +44,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### libjpeg-turbo (https://github.com/libjpeg-turbo/libjpeg-turbo)
 
-Vendored at release `3.2.0`, commit `c85e6b905bf237038faa936dab160ebfc5da0344`. The vendored copy holds the library's sources and SIMD routines unchanged, without the libjpeg-turbo programs or the TurboJPEG API. It adds the configuration headers in `vendor/libjpeg-turbo/config/`, in place of the ones the libjpeg-turbo build generates.
+Vendored at release `3.2.1`, commit `c85e6b905bf237038faa936dab160ebfc5da0344`. The vendored copy holds the library's sources and SIMD routines unchanged, without the libjpeg-turbo programs or the TurboJPEG API. It adds the configuration headers in `vendor/libjpeg-turbo/config/`, in place of the ones the libjpeg-turbo build generates.
 
 This software is based in part on the work of the Independent JPEG Group.
 
