@@ -62,7 +62,7 @@ const struct Str GALLERY_CONFIG_PATH_DEFAULT = STR_INIT("fram.toml");
 
 // The root album already renders to `index.html`. A default aggregate of that name would make the
 // default configuration fail its manifest phase, so the default array is intentionally empty.
-static const struct Str AGGREGATE_TEMPLATES_DEFAULT[] = {{0}};
+static const struct Str AGGREGATE_TEMPLATES_DEFAULT[] = {0};
 
 /**
  * Every key the top-level table may hold. The load rejects a key outside this list, so a misspelled

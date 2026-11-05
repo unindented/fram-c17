@@ -246,7 +246,7 @@ static int job_run_report_errors(const struct JobSet* jobs, int pool_rc, struct 
   // true scale. A job's messages are compared as a whole, because a job that failed several ways
   // says so in one block. Each line compares only up to the job's own name, so a cause that every
   // job attributes to itself still collapses into one.
-  struct Str reported[JOB_ERROR_REPORT_COUNT_MAX] = {{0}};
+  struct Str reported[JOB_ERROR_REPORT_COUNT_MAX] = {0};
   ptrdiff_t failure_count = 0;
   ptrdiff_t reported_count = 0;
   for (ptrdiff_t i = 0; i < jobs->count; i++) {

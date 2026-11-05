@@ -185,7 +185,7 @@ static void test_probe_media_retains_clamped_video_frame(void) {
                            .derivatives = derivatives,
                            .derivative_count = 3};
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct OsStat stats[1] = {0};
   struct JobArenas* worker_arenas = NULL;
   struct Log log = test_log();
@@ -250,7 +250,7 @@ static void test_probe_media_names_video_of_invalid_frame(void) {
   config.derivative_count = 0;
   struct MediaItem item = {.source_path = S("short.mp4"), .kind = MEDIA_KIND_VIDEO};
   struct MediaItem* media[] = {&item};
-  struct VideoFrame frames[1] = {{0}};
+  struct VideoFrame frames[1] = {0};
   struct OsStat stats[1] = {0};
   struct JobArenas* worker_arenas = NULL;
   struct Log log = test_log();
