@@ -31,11 +31,16 @@ function(fram_add_unit_test module)
   add_test(NAME "fram.${arg_NAME}" COMMAND ${target} WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}")
   # A unit test that hangs fails after this many seconds instead of stopping the whole run. That is
   # several times the slowest unit test in an 8-job ASan run on an Apple M1 Max, which took under
-  # 10 seconds.
+  # 10 seconds. ThreadSanitizer is slower: the slowest unit test took about 18 seconds under it on
+  # an Apple M1 Max, and up to 61 seconds on a GitHub macOS runner, so a TSan build waits longer.
+  set(timeout 60)
+  if(FRAM_SANITIZER STREQUAL "thread")
+    set(timeout 300)
+  endif()
   set_tests_properties(
     "fram.${arg_NAME}"
     PROPERTIES LABELS "fram;unit"
-               TIMEOUT 60
+               TIMEOUT ${timeout}
                ENVIRONMENT_MODIFICATION "UBSAN_OPTIONS=string_prepend:print_stacktrace=1:"
   )
 
