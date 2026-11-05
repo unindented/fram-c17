@@ -29,6 +29,20 @@ bool text_is_safe_identifier(struct Str name) {
   return true;
 }
 
+bool text_has_suffix_folded(struct Str text, struct Str suffix) {
+  if (text.len < suffix.len) {
+    return false;
+  }
+  const struct Str candidate = str_tail(text, text.len - suffix.len);
+  for (ptrdiff_t i = 0; i < suffix.len; i++) {
+    if (ascii_to_lower((unsigned char)candidate.data[i]) !=
+        ascii_to_lower((unsigned char)suffix.data[i])) {
+      return false;
+    }
+  }
+  return true;
+}
+
 struct Str text_slugify(struct Str text, struct Arena* arena) {
   // This decides the fallback before allocating. A text with no alphanumeric and no non-ASCII byte
   // slugifies to nothing, and taking the fallback after allocating the `2n` buffer would abandon

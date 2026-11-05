@@ -5,10 +5,10 @@
 #include <stddef.h>
 #include <stdlib.h>
 
-#include "core/ascii.h"
 #include "core/error.h"
 #include "core/path.h"
 #include "core/path_list.h"
+#include "core/text.h"
 #include "runtime/os.h"
 #include "shared/arena.h"
 #include "shared/log.h"
@@ -167,8 +167,8 @@ static bool has_any_suffix(struct Str text,
  *
  * @param text         String to test.
  * @param suffix       Suffix to look for.
- * @param is_fold_case Whether ASCII case differences are ignored, so `.JpG` matches `.jpg`. Bytes
- *                     outside ASCII always compare exactly.
+ * @param is_fold_case Whether ASCII case differences are ignored, as in `text_has_suffix_folded`,
+ *                     so `.JpG` matches `.jpg`.
  * @return `true` when `text` ends with `suffix`, `false` otherwise.
  */
 static bool has_suffix(struct Str text, struct Str suffix, bool is_fold_case);
@@ -346,18 +346,7 @@ static bool has_any_suffix(struct Str text,
 }
 
 static bool has_suffix(struct Str text, struct Str suffix, bool is_fold_case) {
-  if (text.len < suffix.len) {
-    return false;
-  }
-  const struct Str candidate = str_tail(text, text.len - suffix.len);
-  for (ptrdiff_t i = 0; i < suffix.len; i++) {
-    const unsigned char left = (unsigned char)candidate.data[i];
-    const unsigned char right = (unsigned char)suffix.data[i];
-    if (left != right && (!is_fold_case || ascii_to_lower(left) != ascii_to_lower(right))) {
-      return false;
-    }
-  }
-  return true;
+  return is_fold_case ? text_has_suffix_folded(text, suffix) : str_endswith(text, suffix);
 }
 
 static int compare_paths(const void* a, const void* b) {

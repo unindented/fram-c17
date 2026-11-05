@@ -67,18 +67,6 @@ struct MediaItem {
 };
 
 /**
- * @brief Reports whether a path ends with an extension, comparing ASCII case-insensitively.
- *
- * The media listing folds case when it matches its suffixes, so `.JPG` and `.Mp4` reach every
- * classification that uses this.
- *
- * @param path      Path or filename to test.
- * @param extension Extension including its dot, such as `.jpg`.
- * @return `true` when `path` ends with `extension` ignoring ASCII case, otherwise `false`.
- */
-bool media_item_has_extension(struct Str path, struct Str extension);
-
-/**
  * @brief Reports whether a path names an MP4 video source.
  *
  * @param path Path or filename to test.

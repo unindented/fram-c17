@@ -611,7 +611,7 @@ static int add_media(struct SkeletonState* state,
   const struct Str original_extension =
       kind == MEDIA_KIND_VIDEO
           ? S(".mp4")
-          : (media_item_has_extension(file_name, S(".jpeg")) ? S(".jpeg") : S(".jpg"));
+          : (text_has_suffix_folded(file_name, S(".jpeg")) ? S(".jpeg") : S(".jpg"));
   const struct Str original_name = str_concat(file_slug, original_extension, &scratch);
   const struct Str original_media_relative = path_join(album->slug_path, original_name, &scratch);
   const struct Str original_relative =
@@ -770,8 +770,8 @@ static ptrdiff_t path_depth(struct Str path) {
 }
 
 static int classify_media(struct Str file_name, enum MediaKind* kind_out) {
-  if (media_item_has_extension(file_name, S(".jpg")) ||
-      media_item_has_extension(file_name, S(".jpeg"))) {
+  if (text_has_suffix_folded(file_name, S(".jpg")) ||
+      text_has_suffix_folded(file_name, S(".jpeg"))) {
     *kind_out = MEDIA_KIND_IMAGE;
     return 0;
   }

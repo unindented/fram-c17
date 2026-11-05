@@ -888,7 +888,7 @@ static int write_generated_site(struct BuildState* state, struct Log* log) {
   }
   build_verbose(state, "copying static files");
   return site_writer_copy_static_files(&state->writer, &state->gallery_config, &state->static_paths,
-                                       state->scratch, log);
+                                       state->gallery_config.static_dir, state->scratch, log);
 }
 
 static int prune_stale_outputs(struct BuildState* state, struct Log* log) {

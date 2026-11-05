@@ -32,6 +32,18 @@ bool text_is_nul_free(struct Str text);
 bool text_is_safe_identifier(struct Str name);
 
 /**
+ * @brief Reports whether `text` ends with `suffix`, with ASCII letters compared in any case.
+ *
+ * Only `A-Z` folds to `a-z`, so `.MD` matches `.md` and the result does not depend on the locale.
+ * Every byte outside ASCII compares exactly.
+ *
+ * @param text   String to test, such as a path or a file name.
+ * @param suffix Suffix to look for, such as `.md`.
+ * @return `true` when `text` ends with `suffix`, or `false` otherwise.
+ */
+bool text_has_suffix_folded(struct Str text, struct Str suffix);
+
+/**
  * @brief Converts arbitrary text to a lowercase, URL-safe slug in arena-owned storage unless it is
  *        the fallback.
  *

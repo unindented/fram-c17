@@ -72,13 +72,14 @@ int site_writer_write_aggregates(const struct OutputWriter* writer,
 /**
  * @brief Copies every enumerated static file below `output_dir` through `writer`.
  *
- * Each static file keeps its path relative to `static_dir` below `output_dir`, the path
+ * Each static file keeps its path relative to `root_dir` below `output_dir`, the path
  * `manifest_builder_populate` registered.
  *
  * @param writer         Writer every copy is made through. Must not be `NULL`.
- * @param gallery_config Configuration supplying `output_dir` and `static_dir`. Must not be `NULL`.
- * @param static_paths   Every enumerated file below `static_dir`, each already accepted by
+ * @param gallery_config Configuration supplying `output_dir`. Must not be `NULL`.
+ * @param static_paths   Every enumerated file below `root_dir`, each already accepted by
  *                       `manifest_builder_populate`. Must not be `NULL`.
+ * @param root_dir       Directory the paths are below, such as `static_dir`.
  * @param scratch        Arena for each output path.
  * @param log            Log that receives the first failure, which names the path that could not be
  *                       read or written. Must not be `NULL`.
@@ -87,7 +88,8 @@ int site_writer_write_aggregates(const struct OutputWriter* writer,
 int site_writer_copy_static_files(const struct OutputWriter* writer,
                                   const struct GalleryConfig* gallery_config,
                                   const struct PathList* static_paths,
+                                  struct Str root_dir,
                                   struct Arena scratch,
-                                  struct Log* log) __attribute__((nonnull(1, 2, 3, 5)));
+                                  struct Log* log) __attribute__((nonnull(1, 2, 3, 6)));
 
 #endif
