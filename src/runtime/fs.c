@@ -309,7 +309,7 @@ static int report_errno(const struct FsReport* report, struct Str path, int erro
  *
  * This is for a failure on a path the caller cannot name, such as a directory entry or one
  * component of a path created whole, so the message names the step as well, as in
- * `failed to list source media: cannot open directory: <cause> ('<dir>')`.
+ * `failed to list static files: cannot open directory: <cause> ('<dir>')`.
  *
  * @param report       Where the failure is reported. Must not be `NULL`.
  * @param step         Lowercase step that failed, such as `open directory`.
